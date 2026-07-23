@@ -1,0 +1,12 @@
+flowchart LR
+  Browser --> Nuxt
+  Nuxt --> FastAPI
+  FastAPI --> PostgreSQL
+  Scheduler --> Jobs[(background_jobs)]
+  Worker --> Jobs
+  Worker --> PostgreSQL
+  Worker --> FECOCLIMA
+  Worker --> Forecast
+  Worker --> Satellite
+  Worker --> AI
+  Worker --> Reports

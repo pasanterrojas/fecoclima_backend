@@ -1,0 +1,12 @@
+flowchart TD
+  A[Lecturas] --> B[Normalizar y validar]
+  B --> C[Deduplicar]
+  C --> D[Agregados diarios]
+  D --> E[Evaluar seis condiciones]
+  E --> F{Datos completos?}
+  F -- No --> G[DATOS_INSUFICIENTES]
+  F -- Sí --> H[0-2 NINGUNA / 3-5 MODERADA / 6 GRAVE]
+  H --> I[Etapa fenológica]
+  I --> J[Enfermedades con reglas publicadas]
+  J --> K[Persistir resultado]
+  K --> L[Agente explica sin cambiar resultado]
