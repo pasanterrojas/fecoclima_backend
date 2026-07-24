@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     admin,
+    agent_public,
     alerts,
     auth,
     backups,
@@ -12,6 +13,7 @@ from app.api.endpoints import (
     integrations,
     jobs,
     knowledge,
+    notifications,
     phenology,
     public,
     reports,
@@ -27,6 +29,7 @@ for router in [
     health.router,
     auth.router,
     public.router,
+    agent_public.router,
     users.router,
     stations.router,
     resources.router,
@@ -36,6 +39,7 @@ for router in [
     forecasts.router,
     satellite.router,
     knowledge.router,
+    notifications.router,
     integrations.router,
     imports.router,
     exports.router,

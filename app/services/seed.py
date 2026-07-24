@@ -13,9 +13,9 @@ from app.core.security import hash_password
 from app.db.models import (
     AIAgent,
     AIAgentVersion,
+    AgentKnowledgeDocument,
     BaseCondition,
     Crop,
-    CropCycle,
     CropRuleSet,
     CropRuleVersion,
     DiseaseRule,
@@ -28,6 +28,7 @@ from app.db.models import (
     User,
     WeatherReading,
 )
+from app.services.agent_defaults import AI_OUTPUT_SCHEMA, AGENT_PURPOSES, default_agent_prompt
 from app.services.weather import aggregate_range, evaluate_alert_for_day
 
 logger = structlog.get_logger(__name__)
@@ -68,16 +69,6 @@ WHEAT_CONDITIONS = [
     ("leaf_wetness", "Mojado foliar igual o superior a 6 horas", "leaf_wetness_hours", "gte", None, None, 6, "h"),
     ("soil_moisture", "Humedad del suelo igual o superior a 50%", "soil_moisture_avg_pct", "gte", None, None, 50, "%"),
 ]
-
-AI_OUTPUT_SCHEMA = {
-    "resumen": "string",
-    "explicacion_alerta": "string",
-    "enfermedades": [{"nombre": "string", "nivel_riesgo": "bajo|moderado|alto", "justificacion": "string"}],
-    "acciones_recomendadas": ["string"],
-    "variables_a_vigilar": ["string"],
-    "limitaciones": ["string"],
-    "fuentes": [{"documento": "string", "pagina_o_seccion": "string"}],
-}
 
 
 async def _role(db: AsyncSession, code: str) -> Role:
@@ -152,16 +143,120 @@ WHEAT_DISEASES = [
 ]
 
 
-async def _seed_agent(db: AsyncSession, crop: Crop) -> None:
-    code = f"AGENT_{crop.code}"
-    agent = await db.scalar(select(AIAgent).where(AIAgent.code == code))
+async def _seed_agent(db: AsyncSession, crop: Crop, purpose: str) -> None:
+    suffix = {
+        "CROP_ANALYSIS": "GENERAL",
+        "SATELLITE_ANALYSIS": "SATELLITE",
+        "PHENOLOGY_ANALYSIS": "PHENOLOGY",
+        "YEAR_COMPARISON": "YEAR_COMPARE",
+        "DAILY_DIGEST": "DAILY",
+    }[purpose]
+    if purpose == "CROP_ANALYSIS":
+        agent = await db.scalar(
+            select(AIAgent).where(
+                AIAgent.crop_id == crop.id,
+                AIAgent.purpose.in_(["CROP_ANALYSIS", "climate_report"]),
+                AIAgent.deleted_at.is_(None),
+            ).order_by(AIAgent.created_at)
+        )
+        if agent:
+            agent.purpose = "CROP_ANALYSIS"
+            agent.active = True
+            version = await db.scalar(
+                select(AIAgentVersion)
+                .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True))
+                .order_by(AIAgentVersion.created_at.desc())
+                .limit(1)
+            )
+            if not version:
+                db.add(AIAgentVersion(
+                    agent_id=agent.id,
+                    version=agent.current_version or "1.0.0",
+                    system_prompt=default_agent_prompt(crop.name, purpose),
+                    model=settings.ai_default_model,
+                    temperature=0.2,
+                    max_tokens=1500,
+                    output_schema=AI_OUTPUT_SCHEMA,
+                    rag_collection=crop.code,
+                    active=True,
+                ))
+            return
+    agent = await db.scalar(select(AIAgent).where(
+        AIAgent.crop_id == crop.id,
+        AIAgent.purpose == purpose,
+        AIAgent.deleted_at.is_(None),
+    ))
     if agent:
         return
-    agent = AIAgent(name=f"Asistente {crop.name}", code=code, crop_id=crop.id, purpose="climate_report", description="Explica el resultado determinístico con lenguaje sencillo.", current_version="1.0.0")
+    agent = AIAgent(
+        name=f"{AGENT_PURPOSES[purpose]} · {crop.name}",
+        code=f"AGENT_{crop.code}_{suffix}",
+        crop_id=crop.id,
+        purpose=purpose,
+        description=AGENT_PURPOSES[purpose],
+        current_version="1.0.0",
+        active=True,
+    )
     db.add(agent)
     await db.flush()
-    prompt = f"Eres un asistente agrometeorológico para {crop.name} en Paraguay. Explica únicamente el resultado determinístico recibido. No cambies el nivel, número de condiciones, valores ni reglas. Señala datos faltantes. Cita las fuentes recuperadas. No recomiendes productos ni dosis; indica que cualquier aplicación debe validarse con un profesional y la etiqueta vigente. Responde en JSON según el esquema obligatorio."
-    db.add(AIAgentVersion(agent_id=agent.id, version="1.0.0", system_prompt=prompt, model=settings.ai_default_model, temperature=0.2, max_tokens=1400, output_schema=AI_OUTPUT_SCHEMA, rag_collection=crop.code, active=True))
+    db.add(AIAgentVersion(
+        agent_id=agent.id,
+        version="1.0.0",
+        system_prompt=default_agent_prompt(crop.name, purpose),
+        model=settings.ai_default_model,
+        temperature=0.2,
+        max_tokens=1800 if purpose == "SATELLITE_ANALYSIS" else 1500,
+        output_schema=AI_OUTPUT_SCHEMA,
+        rag_collection=crop.code,
+        active=True,
+    ))
+    existing_documents = list(
+        (
+            await db.scalars(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.crop_id == crop.id,
+                    KnowledgeDocument.active.is_(True),
+                    KnowledgeDocument.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    for document in existing_documents:
+        db.add(AgentKnowledgeDocument(agent_id=agent.id, document_id=document.id))
+
+
+async def _link_document_to_crop_agents(db: AsyncSession, document: KnowledgeDocument) -> None:
+    """Link a seeded crop document to every active agent for that crop.
+
+    The migration backfills existing deployments, while this helper covers clean
+    installations where agents are seeded before the bundled documents.
+    """
+    if document.crop_id is None or document.deleted_at is not None or not document.active:
+        return
+    agents = list(
+        (
+            await db.scalars(
+                select(AIAgent).where(
+                    AIAgent.crop_id == document.crop_id,
+                    AIAgent.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    if not agents:
+        return
+    linked_agent_ids = set(
+        (
+            await db.scalars(
+                select(AgentKnowledgeDocument.agent_id).where(
+                    AgentKnowledgeDocument.document_id == document.id
+                )
+            )
+        ).all()
+    )
+    for agent in agents:
+        if agent.id not in linked_agent_ids:
+            db.add(AgentKnowledgeDocument(agent_id=agent.id, document_id=document.id))
 
 
 async def seed_all(db: AsyncSession) -> None:
@@ -180,18 +275,69 @@ async def seed_all(db: AsyncSession) -> None:
     await _seed_stages(db, wheat, WHEAT_STAGES)
     await _seed_rule(db, soy, "1.0.0", SOY_CONDITIONS, SOY_DISEASES)
     await _seed_rule(db, wheat, "1.0.0", WHEAT_CONDITIONS, WHEAT_DISEASES)
-    await _seed_agent(db, soy)
-    await _seed_agent(db, wheat)
+    for crop in (soy, wheat, corn):
+        for purpose in AGENT_PURPOSES:
+            await _seed_agent(db, crop, purpose)
     station = await db.scalar(select(Station).where(Station.code == "RAUL-PENA"))
     if not station:
-        station = Station(name="Raul Peña", code="RAUL-PENA", external_guid="C2694D32-5A4B-48C0-A3B6-8345D9E4935B", country="Paraguay", timezone="America/Asuncion", source_type="FECOCLIMA_API", expected_interval_minutes=10, integration_config={"header_name": "clima-key", "range_max_months": 6}, leaf_sensor_config={"mode": "unknown"}, available_variables=["temp", "chill", "hIndex", "humid", "dewpt", "wind", "hiWind", "windDir", "rain", "totalRain", "barom", "solar", "et", "uv", "temperaturaSuelo", "humedadSuelo", "sensorHoja"])
+        station = Station(
+            name="Raul Peña",
+            code="RAUL-PENA",
+            external_guid="C2694D32-5A4B-48C0-A3B6-8345D9E4935B",
+            country="Paraguay",
+            department="Alto Paraná",
+            district="Doctor Raúl Peña",
+            locality="Doctor Raúl Peña",
+            latitude=-26.15851,
+            longitude=-55.27218,
+            altitude_m=364,
+            timezone="America/Asuncion",
+            source_type="FECOCLIMA_API",
+            expected_interval_minutes=10,
+            integration_config={
+                "header_name": "clima-key",
+                "range_max_months": 6,
+                "coordinate_source": "locality_centroid_approximation",
+                "coordinate_note": "Actualizar con la coordenada exacta de la estación cuando esté disponible.",
+            },
+            leaf_sensor_config={
+                "mode": "threshold",
+                "wet_threshold": 6,
+                "scale_min": 0,
+                "scale_max": 15,
+                "interpretation": "samples_at_or_above_threshold_count_as_wet",
+            },
+            available_variables=["temp", "chill", "hIndex", "humid", "dewpt", "wind", "hiWind", "windDir", "rain", "totalRain", "barom", "solar", "et", "uv", "temperaturaSuelo", "humedadSuelo", "sensorHoja"],
+        )
         db.add(station)
+    else:
+        station.department = station.department or "Alto Paraná"
+        station.district = station.district or "Doctor Raúl Peña"
+        station.locality = station.locality or "Doctor Raúl Peña"
+        station.latitude = station.latitude if station.latitude is not None else -26.15851
+        station.longitude = station.longitude if station.longitude is not None else -55.27218
+        station.altitude_m = station.altitude_m if station.altitude_m is not None else 364
+        integration_config = dict(station.integration_config or {})
+        integration_config.setdefault("header_name", "clima-key")
+        integration_config.setdefault("range_max_months", 6)
+        integration_config.setdefault("coordinate_source", "locality_centroid_approximation")
+        integration_config.setdefault("coordinate_note", "Actualizar con la coordenada exacta de la estación cuando esté disponible.")
+        station.integration_config = integration_config
+        if (station.leaf_sensor_config or {}).get("mode") in {None, "", "unknown"}:
+            station.leaf_sensor_config = {
+                "mode": "threshold",
+                "wet_threshold": 6,
+                "scale_min": 0,
+                "scale_max": 15,
+                "interpretation": "samples_at_or_above_threshold_count_as_wet",
+            }
     for config in [
         ("API FECOCLIMA", "WEATHER", "FECOCLIMA", settings.fecoclima_base_url),
         ("Pronóstico Open-Meteo", "FORECAST", "OPEN_METEO", settings.open_meteo_base_url),
-        ("Sentinel-2", "SATELLITE", "COPERNICUS_DATA_SPACE", None),
+        ("Sentinel-2", "SATELLITE", "COPERNICUS_DATA_SPACE", settings.copernicus_stac_search_url),
         ("Proveedor IA", "AI", "OPENAI_COMPATIBLE", settings.ai_base_url),
         ("Correo SMTP", "SMTP", "SMTP", None),
+        ("Avisos diarios a productores", "NOTIFICATION", "EMAIL_TELEGRAM_DIGEST", None),
     ]:
         existing = await db.scalar(select(IntegrationConfig).where(IntegrationConfig.name == config[0]))
         if not existing:
@@ -204,7 +350,19 @@ async def seed_all(db: AsyncSession) -> None:
     for title, crop_id, institution, year, text in source_docs:
         existing = await db.scalar(select(KnowledgeDocument).where(KnowledgeDocument.title == title))
         if not existing:
-            db.add(KnowledgeDocument(title=title, crop_id=crop_id, institution=institution, year=year, version="1.0", source_text=text, index_status="PENDING", active=True))
+            existing = KnowledgeDocument(
+                title=title,
+                crop_id=crop_id,
+                institution=institution,
+                year=year,
+                version="1.0",
+                source_text=text,
+                index_status="PENDING",
+                active=True,
+            )
+            db.add(existing)
+            await db.flush()
+        await _link_document_to_crop_agents(db, existing)
     await db.commit()
     if settings.load_demo_data:
         await seed_demo(db, soy, wheat)
@@ -221,11 +379,7 @@ async def seed_demo(db: AsyncSession, soy: Crop, wheat: Crop) -> None:
         plot = Plot(name="Parcela demostrativa de soja", producer_name="Datos ficticios", crop_id=soy.id, station_id=station.id, area_ha=5, latitude=station.latitude, longitude=station.longitude, influence_radius_m=500)
         db.add(plot)
         await db.flush()
-    cycle = await db.scalar(select(CropCycle).where(CropCycle.name == "Ciclo demo soja"))
-    if not cycle:
-        cycle = CropCycle(name="Ciclo demo soja", plot_id=plot.id, station_id=station.id, crop_id=soy.id, planting_date=date.today() - timedelta(days=64), sowing_type="directa", cycle_type="normal", variety="Demostrativa", status="ACTIVE", observations="Datos ficticios para validar interfaz y flujo.")
-        db.add(cycle)
-        await db.flush()
+    demo_planting_date = date.today() - timedelta(days=64)
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=96)
     for index in range(193):
         sampled = start + timedelta(minutes=30 * index)
@@ -242,6 +396,6 @@ async def seed_demo(db: AsyncSession, soy: Crop, wheat: Crop) -> None:
     await aggregate_range(db, station.id, date_from, date_to)
     current = date_from
     while current <= date_to:
-        await evaluate_alert_for_day(db, station.id, soy.id, current, cycle_id=cycle.id)
-        await evaluate_alert_for_day(db, station.id, wheat.id, current)
+        await evaluate_alert_for_day(db, station.id, soy.id, current, planting_date=demo_planting_date)
+        await evaluate_alert_for_day(db, station.id, wheat.id, current, planting_date=demo_planting_date)
         current += timedelta(days=1)

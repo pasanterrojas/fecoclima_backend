@@ -5,48 +5,247 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {"key": "baseUrl", "value": "http://localhost:8000/api/v1"},
-    {"key": "stationId", "value": ""},
-    {"key": "cropCode", "value": "SOJA"},
-    {"key": "csrfToken", "value": ""}
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1"
+    },
+    {
+      "key": "stationId",
+      "value": ""
+    },
+    {
+      "key": "cropCode",
+      "value": "SOJA"
+    },
+    {
+      "key": "csrfToken",
+      "value": ""
+    },
+    {
+      "key": "openMeteoIntegrationId",
+      "value": ""
+    },
+    {
+      "key": "copernicusIntegrationId",
+      "value": ""
+    }
   ],
   "item": [
     {
       "name": "Salud",
       "item": [
-        {"name": "Health", "request": {"method": "GET", "url": "{{baseUrl}}/health"}},
-        {"name": "Ready", "request": {"method": "GET", "url": "{{baseUrl}}/ready"}}
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          }
+        },
+        {
+          "name": "Ready",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/ready"
+          }
+        }
       ]
     },
     {
       "name": "Autenticación",
       "item": [
-        {"name": "Login", "request": {"method": "POST", "header": [{"key": "Content-Type", "value": "application/json"}], "body": {"mode": "raw", "raw": "{\n  \"email\": \"admin@fecoclima.local\",\n  \"password\": \"CAMBIAR_PASSWORD_ADMIN_123\"\n}"}, "url": "{{baseUrl}}/auth/login"}},
-        {"name": "Usuario actual", "request": {"method": "GET", "url": "{{baseUrl}}/auth/me"}},
-        {"name": "Logout", "request": {"method": "POST", "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}], "url": "{{baseUrl}}/auth/logout"}}
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@fecoclima.local\",\n  \"password\": \"CAMBIAR_PASSWORD_ADMIN_123\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/login"
+          }
+        },
+        {
+          "name": "Usuario actual",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/auth/me"
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/logout"
+          }
+        }
       ]
     },
     {
       "name": "Portal público",
       "item": [
-        {"name": "Estaciones", "request": {"method": "GET", "url": "{{baseUrl}}/public/stations"}},
-        {"name": "Cultivos", "request": {"method": "GET", "url": "{{baseUrl}}/public/crops"}},
-        {"name": "Dashboard", "request": {"method": "GET", "url": "{{baseUrl}}/public/dashboard?station_id={{stationId}}&crop_code={{cropCode}}&period=72h"}}
+        {
+          "name": "Estaciones",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/stations"
+          }
+        },
+        {
+          "name": "Cultivos",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/crops"
+          }
+        },
+        {
+          "name": "Dashboard",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/dashboard?station_id={{stationId}}&crop_code={{cropCode}}&planting_date=2026-05-20&period=72h"
+          }
+        }
       ]
     },
     {
       "name": "Estaciones",
       "item": [
-        {"name": "Listado CMS", "request": {"method": "GET", "url": "{{baseUrl}}/stations"}},
-        {"name": "Probar API FECOCLIMA", "request": {"method": "POST", "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}], "url": "{{baseUrl}}/stations/{{stationId}}/test-connection"}},
-        {"name": "Sincronizar últimos 7 días", "request": {"method": "POST", "header": [{"key": "X-CSRF-Token", "value": "{{csrfToken}}"}], "url": "{{baseUrl}}/stations/{{stationId}}/sync"}}
+        {
+          "name": "Listado CMS",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/stations"
+          }
+        },
+        {
+          "name": "Probar API FECOCLIMA",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/stations/{{stationId}}/test-connection"
+          }
+        },
+        {
+          "name": "Sincronizar últimos 7 días",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/stations/{{stationId}}/sync"
+          }
+        }
       ]
     },
     {
       "name": "Reportes",
       "item": [
-        {"name": "Crear reporte", "request": {"method": "POST", "header": [{"key": "Content-Type", "value": "application/json"}], "body": {"mode": "raw", "raw": "{\n  \"station_id\": \"{{stationId}}\",\n  \"crop_code\": \"SOJA\",\n  \"date_from\": \"2026-07-01\",\n  \"date_to\": \"2026-07-07\"\n}"}, "url": "{{baseUrl}}/reports"}},
-        {"name": "Historial público", "request": {"method": "GET", "url": "{{baseUrl}}/reports/public"}}
+        {
+          "name": "Crear reporte",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"station_id\": \"{{stationId}}\",\n  \"crop_code\": \"SOJA\",\n  \"planting_date\": \"2026-05-20\",\n  \"date_from\": \"2026-07-01\",\n  \"date_to\": \"2026-07-07\"\n}"
+            },
+            "url": "{{baseUrl}}/reports"
+          }
+        },
+        {
+          "name": "Historial público",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/reports/public"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pronóstico e integraciones",
+      "item": [
+        {
+          "name": "Probar Open-Meteo",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/integrations/{{openMeteoIntegrationId}}/test"
+          }
+        },
+        {
+          "name": "Probar Copernicus",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/integrations/{{copernicusIntegrationId}}/test"
+          }
+        },
+        {
+          "name": "Dashboard con pronóstico",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/dashboard?station_id={{stationId}}&crop_code={{cropCode}}&planting_date=2026-03-31&period=72h"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Satélite Sentinel-2",
+      "item": [
+        {
+          "name": "Procesar estación ahora",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/satellite/stations/{{stationId}}/sync?force=true"
+          }
+        },
+        {
+          "name": "Listar observaciones",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/satellite?limit=20"
+          }
+        }
       ]
     }
   ]

@@ -96,6 +96,8 @@ class Station(Base, TimestampMixin, SoftDeleteMixin):
     integration_config: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     available_variables: Mapped[list[str]] = mapped_column(JSONType, default=list)
     leaf_sensor_config: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    influence_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    influence_radius_m: Mapped[int | None] = mapped_column(Integer)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
@@ -186,7 +188,7 @@ class Plot(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(180), index=True)
     producer_name: Mapped[str | None] = mapped_column(String(180))
-    crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
+    crop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crops.id", ondelete="SET NULL"), index=True)
     station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
     area_ha: Mapped[float | None] = mapped_column(Numeric(12, 3))
     latitude: Mapped[float | None] = mapped_column(Float)
@@ -307,6 +309,7 @@ class AlertEvaluation(Base, TimestampMixin):
     station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="CASCADE"), index=True)
     crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="CASCADE"), index=True)
     crop_cycle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crop_cycles.id", ondelete="SET NULL"), index=True)
+    planting_date: Mapped[date | None] = mapped_column(Date, index=True)
     rule_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crop_rule_versions.id", ondelete="SET NULL"))
     evaluation_date: Mapped[date] = mapped_column(Date, index=True)
     stage_code: Mapped[str | None] = mapped_column(String(80))
@@ -321,7 +324,7 @@ class AlertEvaluation(Base, TimestampMixin):
     explanation: Mapped[str | None] = mapped_column(Text)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
-        UniqueConstraint("station_id", "crop_id", "crop_cycle_id", "evaluation_date", name="uq_alert_context_date"),
+        UniqueConstraint("station_id", "crop_id", "planting_date", "evaluation_date", name="uq_alert_context_planting_date"),
         Index("ix_alert_station_crop_date", "station_id", "crop_id", evaluation_date.desc()),
     )
 
@@ -402,6 +405,15 @@ class KnowledgeDocument(Base, TimestampMixin, SoftDeleteMixin):
     index_error: Mapped[str | None] = mapped_column(Text)
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class AgentKnowledgeDocument(Base, TimestampMixin):
+    __tablename__ = "agent_knowledge_documents"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ai_agents.id", ondelete="CASCADE"), index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    __table_args__ = (UniqueConstraint("agent_id", "document_id", name="uq_agent_knowledge_document"),)
 
 
 class KnowledgeChunk(Base, TimestampMixin):
@@ -499,6 +511,7 @@ class Report(Base, TimestampMixin):
     station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
     crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
     crop_cycle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crop_cycles.id", ondelete="SET NULL"), index=True)
+    planting_date: Mapped[date | None] = mapped_column(Date, index=True)
     date_from: Mapped[date] = mapped_column(Date)
     date_to: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True)

@@ -1,26 +1,97 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 
-def calculate_stage(planting_date: date, on_date: date, stages: list[dict[str, Any]]) -> dict[str, Any]:
-    days = max(0, (on_date - planting_date).days)
-    ordered = sorted(stages, key=lambda item: item["order_index"])
-    if not ordered:
-        return {"days_after_planting": days, "stage_code": None, "stage_name": "Configuración pendiente", "description": "No hay un calendario fenológico publicado.", "timeline": []}
-    current = ordered[-1]
-    for stage in ordered:
-        if stage["start_day"] <= days <= stage["end_day"]:
-            current = stage
-            break
+def _timeline(planting_date: date, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for stage in sorted(stages, key=lambda item: item["order_index"]):
+        start_day = int(stage["start_day"])
+        end_day = int(stage["end_day"])
+        rows.append(
+            {
+                **stage,
+                "estimated_start_date": (planting_date + timedelta(days=start_day)).isoformat(),
+                "estimated_end_date": (planting_date + timedelta(days=end_day)).isoformat(),
+            }
+        )
+    return rows
+
+
+def calculate_stage(
+    planting_date: date,
+    on_date: date,
+    stages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Estimate phenology exclusively from crop calendar + planting date.
+
+    The result is intentionally an estimate. The crop calendar comes from the
+    technical source configured for the crop; no sowing window or crop cycle
+    record is required.
+    """
+
+    days = (on_date - planting_date).days
+    timeline = _timeline(planting_date, stages)
+
+    if not timeline:
+        return {
+            "planting_date": planting_date.isoformat(),
+            "analysis_date": on_date.isoformat(),
+            "days_after_planting": days,
+            "stage_code": None,
+            "stage_name": "Configuración pendiente",
+            "description": "Este cultivo todavía no tiene un calendario fenológico publicado.",
+            "stage_start_day": None,
+            "stage_end_day": None,
+            "stage_progress_pct": None,
+            "cycle_finished": False,
+            "timeline": [],
+        }
+
+    if days < 0:
+        return {
+            "planting_date": planting_date.isoformat(),
+            "analysis_date": on_date.isoformat(),
+            "days_after_planting": days,
+            "stage_code": "NO_INICIADO",
+            "stage_name": "Siembra aún no iniciada",
+            "description": "La fecha de análisis es anterior a la fecha de siembra indicada.",
+            "stage_start_day": None,
+            "stage_end_day": None,
+            "stage_progress_pct": 0.0,
+            "cycle_finished": False,
+            "timeline": timeline,
+        }
+
+    selected = next(
+        (
+            stage
+            for stage in timeline
+            if int(stage["start_day"]) <= days <= int(stage["end_day"])
+        ),
+        None,
+    )
+    cycle_finished = False
+    if selected is None:
+        selected = timeline[-1]
+        cycle_finished = days > int(selected["end_day"])
+
+    start_day = int(selected["start_day"])
+    end_day = int(selected["end_day"])
+    duration = max(1, end_day - start_day + 1)
+    progress = max(0.0, min(100.0, ((days - start_day + 1) / duration) * 100))
+
     return {
+        "planting_date": planting_date.isoformat(),
+        "analysis_date": on_date.isoformat(),
         "days_after_planting": days,
-        "stage_code": current["code"],
-        "stage_name": current["name"],
-        "description": current.get("description") or f"Etapa estimada por días transcurridos desde la siembra.",
-        "timeline": [
-            {"code": stage["code"], "name": stage["name"], "start_day": stage["start_day"], "end_day": stage["end_day"]}
-            for stage in ordered
-        ],
+        "stage_code": selected["code"],
+        "stage_name": selected["name"],
+        "description": selected.get("description"),
+        "stage_start_day": start_day,
+        "stage_end_day": end_day,
+        "stage_progress_pct": round(progress, 1),
+        "cycle_finished": cycle_finished,
+        "timeline": timeline,
     }

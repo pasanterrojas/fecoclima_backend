@@ -12,12 +12,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import BackgroundJob, CropRuleVersion, Report, Station, WeatherForecast
+from app.db.models import BackgroundJob, Report, Station, WeatherForecast
 from app.services.backups import create_database_backup
-from app.services.forecast import fetch_open_meteo
+from app.services.forecast import refresh_station_forecast
 from app.services.rag import index_document
 from app.services.reporting import generate_report_pdf
-from app.services.satellite import search_copernicus_catalog
+from app.services.producer_notifications import generate_daily_digest
+from app.services.satellite import search_copernicus_catalog, sync_satellite_for_station
 from app.services.weather import aggregate_range, evaluate_alert_for_day, sync_fecoclima_station
 
 logger = structlog.get_logger(__name__)
@@ -111,42 +112,9 @@ async def claim_job(db: AsyncSession, worker_name: str) -> BackgroundJob | None:
 
 async def _refresh_forecast(db: AsyncSession, station_id) -> dict[str, Any]:
     station = await db.get(Station, station_id)
-    if not station or station.latitude is None or station.longitude is None:
-        raise ValueError("La estación no tiene coordenadas para pronóstico")
-    rows = await fetch_open_meteo(station.latitude, station.longitude)
-    generated_at = datetime.now(UTC)
-    for row in rows:
-        values = {
-            "station_id": station.id,
-            "forecast_date": date.fromisoformat(row["date"]),
-            "generated_at": generated_at,
-            "provider": row["provider"],
-            "temperature_min_c": row.get("temperature_min_c"),
-            "temperature_max_c": row.get("temperature_max_c"),
-            "precipitation_mm": row.get("precipitation_mm"),
-            "precipitation_probability_pct": row.get("precipitation_probability_pct"),
-            "humidity_pct": row.get("humidity_pct"),
-            "wind_speed_ms": (row.get("wind_speed_kmh") / 3.6)
-            if row.get("wind_speed_kmh") is not None
-            else None,
-            "evapotranspiration_mm": row.get("evapotranspiration_mm"),
-            "raw_payload": row,
-        }
-        statement = insert(WeatherForecast).values(**values).on_conflict_do_update(
-            index_elements=[
-                WeatherForecast.station_id,
-                WeatherForecast.forecast_date,
-                WeatherForecast.provider,
-            ],
-            set_={
-                key: value
-                for key, value in values.items()
-                if key not in {"station_id", "forecast_date", "provider"}
-            },
-        )
-        await db.execute(statement)
-    await db.commit()
-    return {"days": len(rows), "provider": "Open-Meteo"}
+    if not station:
+        raise ValueError("Estación no encontrada")
+    return await refresh_station_forecast(db, station)
 
 
 async def _evaluate_range(
@@ -155,27 +123,20 @@ async def _evaluate_range(
     date_from: date,
     date_to: date,
     crop_id=None,
-    cycle_id=None,
+    planting_date: date | None = None,
 ) -> dict[str, Any]:
-    if crop_id:
-        crop_ids = [crop_id]
-    else:
-        crop_ids = list(
-            (
-                await db.scalars(
-                    select(CropRuleVersion.crop_id)
-                    .where(CropRuleVersion.status == "PUBLISHED")
-                    .distinct()
-                )
-            ).all()
-        )
+    # Las alertas específicas requieren cultivo y fecha de siembra. La sincronización
+    # meteorológica por sí sola no debe inventar un contexto fenológico.
+    if not crop_id or not planting_date:
+        return {"evaluations": 0, "reason": "crop_and_planting_date_required"}
     count = 0
-    for current_crop_id in crop_ids:
-        current = date_from
-        while current <= date_to:
-            await evaluate_alert_for_day(db, station_id, current_crop_id, current, cycle_id=cycle_id)
-            count += 1
-            current += timedelta(days=1)
+    current = date_from
+    while current <= date_to:
+        await evaluate_alert_for_day(
+            db, station_id, crop_id, current, planting_date=planting_date
+        )
+        count += 1
+        current += timedelta(days=1)
     return {"evaluations": count}
 
 
@@ -207,7 +168,7 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             date_from,
             date_to,
             crop_id=payload.get("crop_id"),
-            cycle_id=payload.get("cycle_id"),
+            planting_date=(date.fromisoformat(payload["planting_date"]) if payload.get("planting_date") else None),
         )
         return {**sync_result, "aggregated_days": aggregate_count, **alert_result}
     if job.job_type == "AGGREGATE_ALERTS":
@@ -220,7 +181,7 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             date_from,
             date_to,
             crop_id=payload.get("crop_id"),
-            cycle_id=payload.get("cycle_id"),
+            planting_date=(date.fromisoformat(payload["planting_date"]) if payload.get("planting_date") else None),
         )
         return {"aggregated_days": aggregate_count, **alerts}
     if job.job_type == "REPORT_GENERATE":
@@ -234,7 +195,7 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             report.date_from,
             report.date_to,
             crop_id=report.crop_id,
-            cycle_id=report.crop_cycle_id,
+            planting_date=report.planting_date,
         )
         file = await generate_report_pdf(db, report.id)
         return {"report_file_id": str(file.id), "size_bytes": file.size_bytes}
@@ -244,6 +205,8 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
     if job.job_type == "FORECAST_REFRESH":
         return await _refresh_forecast(db, payload["station_id"])
     if job.job_type == "SATELLITE_SYNC":
+        if payload.get("station_id"):
+            return await sync_satellite_for_station(db, payload["station_id"], force=bool(payload.get("force", False)))
         return await search_copernicus_catalog(
             db,
             payload["plot_id"],
@@ -251,6 +214,8 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             date.fromisoformat(payload["date_to"]),
             float(payload.get("max_cloud_percentage", 40)),
         )
+    if job.job_type == "DAILY_PRODUCER_DIGEST":
+        return await generate_daily_digest(db, force=bool(payload.get("force")))
     if job.job_type == "DATABASE_BACKUP":
         row = await create_database_backup(db, job.created_by, payload.get("label"))
         if row.status != "COMPLETED":

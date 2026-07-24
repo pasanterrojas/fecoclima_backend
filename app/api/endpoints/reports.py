@@ -47,12 +47,21 @@ async def create_report(payload: ReportCreate, request: Request, db: DbSession) 
     station = await db.get(Station, payload.station_id)
     if not station or not crop:
         raise HTTPException(status_code=400, detail="Estación o cultivo inválido")
-    cycle_id = payload.crop_cycle_id or payload.cycle_id
     rule = await db.scalar(select(CropRuleVersion).where(CropRuleVersion.crop_id == crop.id, CropRuleVersion.status == "PUBLISHED").order_by(CropRuleVersion.created_at.desc()).limit(1))
-    report = Report(title=f"Reporte {crop.name} · {station.name}", station_id=station.id, crop_id=crop.id, crop_cycle_id=cycle_id, date_from=payload.date_from, date_to=payload.date_to, status="PENDING", rule_version=rule.version if rule else None)
+    report = Report(
+        title=f"Reporte {crop.name} · {station.name}",
+        station_id=station.id,
+        crop_id=crop.id,
+        crop_cycle_id=None,
+        planting_date=payload.planting_date,
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+        status="PENDING",
+        rule_version=rule.version if rule else None,
+    )
     db.add(report); await db.flush()
     job = await enqueue_job(db, "REPORT_GENERATE", {"report_id": str(report.id)}, priority=50)
-    await write_audit(db, action="REPORT_REQUEST", request=request, entity_type="report", entity_id=str(report.id), after={"station": station.name, "crop": crop.name, "date_from": payload.date_from.isoformat(), "date_to": payload.date_to.isoformat(), "job_id": str(job.id)})
+    await write_audit(db, action="REPORT_REQUEST", request=request, entity_type="report", entity_id=str(report.id), after={"station": station.name, "crop": crop.name, "planting_date": payload.planting_date.isoformat(), "date_from": payload.date_from.isoformat(), "date_to": payload.date_to.isoformat(), "job_id": str(job.id)})
     await db.commit()
     return await _serialize(db, report)
 

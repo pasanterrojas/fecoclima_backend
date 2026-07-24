@@ -14,7 +14,6 @@ from app.db.models import (
     AlertEvaluation,
     BaseCondition,
     Crop,
-    CropCycle,
     CropRuleVersion,
     DiseaseRule,
     IntegrationLog,
@@ -120,6 +119,31 @@ async def sync_fecoclima_station(db: AsyncSession, station_id, date_from: date, 
         raise
 
 
+RAUL_PENA_GUID = "C2694D32-5A4B-48C0-A3B6-8345D9E4935B"
+
+
+def effective_leaf_sensor_config(station: Station) -> dict:
+    """Return validated station semantics for the raw leaf sensor.
+
+    The supplied crop-alert sheets use 6 as the operational leaf-sensor
+    threshold. For Raul Peña, samples at or above 6 are counted as wet and 0
+    is treated as a valid dry reading, not missing data. Other stations remain
+    explicit/configurable until their sensor semantics are validated.
+    """
+    config = dict(station.leaf_sensor_config or {})
+    if station.external_guid and station.external_guid.upper() == RAUL_PENA_GUID:
+        if config.get("mode") in {None, "", "unknown"}:
+            return {
+                "mode": "threshold",
+                "wet_threshold": 6,
+                "scale_min": 0,
+                "scale_max": 15,
+                "interpretation": "samples_at_or_above_threshold_count_as_wet",
+                "source": "project_rule_from_supplied_spreadsheets",
+            }
+    return config
+
+
 def _leaf_wetness_hours(values: pd.Series, config: dict, expected_interval_minutes: int) -> float | None:
     mode = config.get("mode", "unknown")
     clean = pd.to_numeric(values, errors="coerce").dropna()
@@ -144,7 +168,13 @@ async def aggregate_station_day(db: AsyncSession, station: Station, summary_date
     local_end = local_start + timedelta(days=1)
     utc_start, utc_end = local_start.astimezone(UTC), local_end.astimezone(UTC)
     rows = (await db.scalars(select(WeatherReading).where(WeatherReading.station_id == station.id, WeatherReading.sampled_at >= utc_start, WeatherReading.sampled_at < utc_end).order_by(WeatherReading.sampled_at))).all()
-    expected = max(1, round(24 * 60 / max(1, station.expected_interval_minutes)))
+    interval_minutes = max(1, station.expected_interval_minutes)
+    now_local = datetime.now(tz)
+    if summary_date == now_local.date():
+        elapsed_minutes = max(0.0, min(1440.0, (now_local - local_start).total_seconds() / 60))
+        expected = max(1, int(elapsed_minutes // interval_minutes) + 1)
+    else:
+        expected = max(1, round(24 * 60 / interval_minutes))
     if rows:
         frame = pd.DataFrame([{c: getattr(row, c) for c in ["temperature_c", "humidity_pct", "rain_mm", "soil_temperature_c", "soil_moisture_pct", "leaf_sensor_value", "solar_wm2", "evapotranspiration_mm"]} for row in rows])
         values = {
@@ -153,7 +183,7 @@ async def aggregate_station_day(db: AsyncSession, station: Station, summary_date
             "rain_sum_mm": frame.rain_mm.sum(min_count=1),
             "soil_temperature_avg_c": frame.soil_temperature_c.mean(skipna=True),
             "soil_moisture_avg_pct": frame.soil_moisture_pct.mean(skipna=True),
-            "leaf_wetness_hours": _leaf_wetness_hours(frame.leaf_sensor_value, station.leaf_sensor_config or {}, station.expected_interval_minutes),
+            "leaf_wetness_hours": _leaf_wetness_hours(frame.leaf_sensor_value, effective_leaf_sensor_config(station), station.expected_interval_minutes),
             "solar_sum_wm2_samples": frame.solar_wm2.sum(min_count=1),
             "evapotranspiration_sum_mm": frame.evapotranspiration_mm.sum(min_count=1),
         }
@@ -194,26 +224,200 @@ async def aggregate_range(db: AsyncSession, station_id, date_from: date, date_to
     return count
 
 
-async def _stage_for_cycle(db: AsyncSession, cycle: CropCycle | None, on_date: date) -> str | None:
-    if not cycle:
-        return None
+async def _phenology_for_date(
+    db: AsyncSession,
+    crop_id,
+    planting_date: date | None,
+    on_date: date,
+) -> dict:
+    if not planting_date:
+        return {
+            "planting_date": None,
+            "analysis_date": on_date.isoformat(),
+            "days_after_planting": None,
+            "stage_code": None,
+            "stage_name": "Fecha de siembra requerida",
+            "description": "Seleccione la fecha de siembra para estimar la etapa fenológica.",
+            "timeline": [],
+        }
     from app.db.models import PhenologyStage
-    stages = (await db.scalars(select(PhenologyStage).where(PhenologyStage.crop_id == cycle.crop_id, PhenologyStage.active.is_(True)).order_by(PhenologyStage.order_index))).all()
-    result = calculate_stage(cycle.planting_date, on_date, [{"code": s.code, "name": s.name, "description": s.description, "order_index": s.order_index, "start_day": s.start_day, "end_day": s.end_day} for s in stages])
-    return result["stage_code"]
+
+    stages = list(
+        (
+            await db.scalars(
+                select(PhenologyStage)
+                .where(
+                    PhenologyStage.crop_id == crop_id,
+                    PhenologyStage.active.is_(True),
+                )
+                .order_by(PhenologyStage.order_index)
+            )
+        ).all()
+    )
+    return calculate_stage(
+        planting_date,
+        on_date,
+        [
+            {
+                "code": stage.code,
+                "name": stage.name,
+                "description": stage.description,
+                "order_index": stage.order_index,
+                "start_day": stage.start_day,
+                "end_day": stage.end_day,
+            }
+            for stage in stages
+        ],
+    )
 
 
-async def evaluate_alert_for_day(db: AsyncSession, station_id, crop_id, summary_date: date, cycle_id=None) -> dict:
-    rule = await db.scalar(select(CropRuleVersion).where(CropRuleVersion.crop_id == crop_id, CropRuleVersion.status == "PUBLISHED", (CropRuleVersion.effective_from.is_(None) | (CropRuleVersion.effective_from <= summary_date)), (CropRuleVersion.effective_to.is_(None) | (CropRuleVersion.effective_to >= summary_date))).order_by(CropRuleVersion.effective_from.desc().nullslast(), CropRuleVersion.created_at.desc()))
+async def _persist_insufficient_without_rule(
+    db: AsyncSession,
+    station_id,
+    crop_id,
+    summary_date: date,
+    planting_date: date | None,
+    phenology: dict,
+) -> dict:
+    result = {
+        "level": "DATOS_INSUFICIENTES",
+        "simple_explanation": "El cultivo no tiene una versión activa de reglas determinísticas.",
+        "conditions": [],
+        "conditions_met": 0,
+        "conditions_total": 0,
+        "completion_percentage": 0,
+        "confidence": 0,
+        "diseases": [],
+        "values_used": {},
+        "stage_code": phenology.get("stage_code"),
+        "phenology": phenology,
+        "rule_version": None,
+    }
+    existing = await db.scalar(
+        select(AlertEvaluation).where(
+            AlertEvaluation.station_id == station_id,
+            AlertEvaluation.crop_id == crop_id,
+            AlertEvaluation.planting_date == planting_date,
+            AlertEvaluation.evaluation_date == summary_date,
+        )
+    )
+    if not existing:
+        existing = AlertEvaluation(
+            station_id=station_id,
+            crop_id=crop_id,
+            crop_cycle_id=None,
+            planting_date=planting_date,
+            evaluation_date=summary_date,
+        )
+        db.add(existing)
+    existing.rule_version_id = None
+    existing.stage_code = phenology.get("stage_code")
+    existing.level = result["level"]
+    existing.conditions_met = 0
+    existing.conditions_total = 0
+    existing.completion_pct = 0
+    existing.confidence = 0
+    existing.values_used = {}
+    existing.diseases = []
+    existing.data_sources = []
+    existing.explanation = result["simple_explanation"]
+    existing.evaluated_at = datetime.now(UTC)
+    await db.flush()
+    await db.execute(
+        delete(AlertConditionResult).where(
+            AlertConditionResult.alert_evaluation_id == existing.id
+        )
+    )
+    await db.commit()
+    result["alert_id"] = str(existing.id)
+    return result
+
+
+async def evaluate_alert_for_day(
+    db: AsyncSession,
+    station_id,
+    crop_id,
+    summary_date: date,
+    planting_date: date | None = None,
+) -> dict:
+    phenology = await _phenology_for_date(db, crop_id, planting_date, summary_date)
+    rule = await db.scalar(
+        select(CropRuleVersion)
+        .where(
+            CropRuleVersion.crop_id == crop_id,
+            CropRuleVersion.status == "PUBLISHED",
+            (
+                CropRuleVersion.effective_from.is_(None)
+                | (CropRuleVersion.effective_from <= summary_date)
+            ),
+            (
+                CropRuleVersion.effective_to.is_(None)
+                | (CropRuleVersion.effective_to >= summary_date)
+            ),
+        )
+        .order_by(
+            CropRuleVersion.effective_from.desc().nullslast(),
+            CropRuleVersion.created_at.desc(),
+        )
+    )
     if not rule:
-        return {"level": "DATOS_INSUFICIENTES", "simple_explanation": "El cultivo no tiene una versión activa de reglas.", "conditions": [], "conditions_met": 0, "conditions_total": 0, "completion_percentage": 0, "confidence": 0, "diseases": [], "values_used": {}}
-    summary = await db.scalar(select(WeatherDailySummary).where(WeatherDailySummary.station_id == station_id, WeatherDailySummary.summary_date == summary_date))
+        return await _persist_insufficient_without_rule(
+            db,
+            station_id,
+            crop_id,
+            summary_date,
+            planting_date,
+            phenology,
+        )
+
+    summary = await db.scalar(
+        select(WeatherDailySummary).where(
+            WeatherDailySummary.station_id == station_id,
+            WeatherDailySummary.summary_date == summary_date,
+        )
+    )
     if not summary:
         station = await db.get(Station, station_id)
+        if not station:
+            raise ValueError("Estación no encontrada")
         summary = await aggregate_station_day(db, station, summary_date)
-    conditions = (await db.scalars(select(BaseCondition).where(BaseCondition.rule_version_id == rule.id, BaseCondition.active.is_(True)).order_by(BaseCondition.order_index))).all()
-    disease_rows = (await db.scalars(select(DiseaseRule).where(DiseaseRule.rule_version_id == rule.id, DiseaseRule.active.is_(True)))).all()
-    specs = [ConditionSpec(key=c.key, label=c.label, variable=c.variable, operator=c.operator, threshold_min=c.threshold_min, threshold_max=c.threshold_max, threshold_value=c.threshold_value, unit=c.unit, required=c.required) for c in conditions]
+
+    conditions = list(
+        (
+            await db.scalars(
+                select(BaseCondition)
+                .where(
+                    BaseCondition.rule_version_id == rule.id,
+                    BaseCondition.active.is_(True),
+                )
+                .order_by(BaseCondition.order_index)
+            )
+        ).all()
+    )
+    disease_rows = list(
+        (
+            await db.scalars(
+                select(DiseaseRule).where(
+                    DiseaseRule.rule_version_id == rule.id,
+                    DiseaseRule.active.is_(True),
+                )
+            )
+        ).all()
+    )
+    specs = [
+        ConditionSpec(
+            key=condition.key,
+            label=condition.label,
+            variable=condition.variable,
+            operator=condition.operator,
+            threshold_min=condition.threshold_min,
+            threshold_max=condition.threshold_max,
+            threshold_value=condition.threshold_value,
+            unit=condition.unit,
+            required=condition.required,
+        )
+        for condition in conditions
+    ]
     values = {
         "temperature_avg_c": summary.temperature_avg_c,
         "humidity_avg_pct": summary.humidity_avg_pct,
@@ -222,22 +426,45 @@ async def evaluate_alert_for_day(db: AsyncSession, station_id, crop_id, summary_
         "soil_moisture_avg_pct": summary.soil_moisture_avg_pct,
         "leaf_wetness_hours": summary.leaf_wetness_hours,
     }
-    cycle = await db.get(CropCycle, cycle_id) if cycle_id else None
-    stage = await _stage_for_cycle(db, cycle, summary_date)
-    disease_rules = [{"name": d.name, "conditions": d.conditions, "valid_stages": d.valid_stages, "validation_status": d.validation_status, "enabled_for_evaluation": d.enabled_for_evaluation, "risk": "moderado"} for d in disease_rows]
-    result = evaluate_daily_alert(values, specs, stage_code=stage, disease_rules=disease_rules, data_completeness=summary.completeness_pct / 100)
-    existing = await db.scalar(select(AlertEvaluation).where(AlertEvaluation.station_id == station_id, AlertEvaluation.crop_id == crop_id, AlertEvaluation.crop_cycle_id == cycle_id, AlertEvaluation.evaluation_date == summary_date))
+    stage = phenology.get("stage_code")
+    disease_rules = [
+        {
+            "name": disease.name,
+            "conditions": disease.conditions,
+            "valid_stages": disease.valid_stages,
+            "validation_status": disease.validation_status,
+            "enabled_for_evaluation": disease.enabled_for_evaluation,
+            "risk": "moderado",
+            "source_reference": disease.source_reference,
+        }
+        for disease in disease_rows
+    ]
+    result = evaluate_daily_alert(
+        values,
+        specs,
+        stage_code=stage,
+        disease_rules=disease_rules,
+        data_completeness=summary.completeness_pct / 100,
+        alert_configuration=rule.configuration,
+    )
+    existing = await db.scalar(
+        select(AlertEvaluation).where(
+            AlertEvaluation.station_id == station_id,
+            AlertEvaluation.crop_id == crop_id,
+            AlertEvaluation.planting_date == planting_date,
+            AlertEvaluation.evaluation_date == summary_date,
+        )
+    )
     if not existing:
         existing = AlertEvaluation(
             station_id=station_id,
             crop_id=crop_id,
-            crop_cycle_id=cycle_id,
+            crop_cycle_id=None,
+            planting_date=planting_date,
             evaluation_date=summary_date,
         )
         db.add(existing)
 
-    # Todos los campos NOT NULL deben asignarse antes del primer flush. De lo
-    # contrario SQLAlchemy intenta insertar la evaluación con level=NULL.
     existing.rule_version_id = rule.id
     existing.stage_code = stage
     existing.level = result["level"]
@@ -251,14 +478,30 @@ async def evaluate_alert_for_day(db: AsyncSession, station_id, crop_id, summary_
     existing.explanation = result["simple_explanation"]
     existing.evaluated_at = datetime.now(UTC)
 
-    # El flush genera el UUID para evaluaciones nuevas una vez que el registro
-    # ya es válido; luego ese UUID se utiliza en los resultados por condición.
     await db.flush()
-    await db.execute(delete(AlertConditionResult).where(AlertConditionResult.alert_evaluation_id == existing.id))
+    await db.execute(
+        delete(AlertConditionResult).where(
+            AlertConditionResult.alert_evaluation_id == existing.id
+        )
+    )
     by_key = {condition.key: condition for condition in conditions}
     for item in result["conditions"]:
-        db.add(AlertConditionResult(alert_evaluation_id=existing.id, condition_id=by_key.get(item["key"]).id if by_key.get(item["key"]) else None, key=item["key"], label=item["label"], status=item["status"], observed_value=item["value"], unit=item["unit"], explanation=item["explanation"]))
+        matched = by_key.get(item["key"])
+        db.add(
+            AlertConditionResult(
+                alert_evaluation_id=existing.id,
+                condition_id=matched.id if matched else None,
+                key=item["key"],
+                label=item["label"],
+                status=item["status"],
+                observed_value=item["value"],
+                unit=item["unit"],
+                explanation=item["explanation"],
+            )
+        )
     await db.commit()
+    result["alert_id"] = str(existing.id)
     result["rule_version"] = rule.version
     result["stage_code"] = stage
+    result["phenology"] = phenology
     return result

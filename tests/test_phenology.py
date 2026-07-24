@@ -16,3 +16,21 @@ def test_missing_calendar_is_explicit():
     result = calculate_stage(date(2026, 7, 1), date(2026, 7, 10), [])
     assert result["stage_code"] is None
     assert result["stage_name"] == "Configuración pendiente"
+
+
+def test_future_planting_date_is_not_started():
+    stages = [
+        {"code": "VE", "name": "Emergencia", "description": "", "order_index": 0, "start_day": 0, "end_day": 5},
+    ]
+    result = calculate_stage(date(2026, 7, 20), date(2026, 7, 10), stages)
+    assert result["stage_code"] == "NO_INICIADO"
+    assert result["stage_progress_pct"] == 0
+
+
+def test_stage_timeline_contains_estimated_dates():
+    stages = [
+        {"code": "VE", "name": "Emergencia", "description": "", "order_index": 0, "start_day": 0, "end_day": 5},
+    ]
+    result = calculate_stage(date(2026, 7, 1), date(2026, 7, 2), stages)
+    assert result["timeline"][0]["estimated_start_date"] == "2026-07-01"
+    assert result["timeline"][0]["estimated_end_date"] == "2026-07-06"

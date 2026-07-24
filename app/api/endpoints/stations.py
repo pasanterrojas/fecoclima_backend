@@ -1,18 +1,53 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, AnalystUser, DbSession
-from app.db.models import BackgroundJob, Station, WeatherReading
+from app.db.models import BackgroundJob, IntegrationConfig, IntegrationLog, Station, WeatherReading
 from app.schemas.resources import StationPayload
 from app.services.audit import write_audit
 from app.services.jobs import enqueue_job
 from app.services.serialization import model_dict
+from app.services.satellite import ensure_station_plot
 
 router = APIRouter(prefix="/stations", tags=["Estaciones"])
+
+
+async def _mark_copernicus_retest_required(db: DbSession, station: Station, detail: str) -> None:
+    integrations = list((await db.scalars(
+        select(IntegrationConfig).where(
+            IntegrationConfig.provider == "COPERNICUS_DATA_SPACE",
+            IntegrationConfig.active.is_(True),
+            IntegrationConfig.deleted_at.is_(None),
+        )
+    )).all())
+    now = datetime.now(UTC)
+    for integration in integrations:
+        integration.last_result = "RETEST_REQUIRED"
+        db.add(
+            IntegrationLog(
+                integration_id=integration.id,
+                station_id=station.id,
+                operation="STATION_GEOZONE_CHANGED",
+                status="RETEST_REQUIRED",
+                started_at=now,
+                finished_at=now,
+                duration_ms=0,
+                extra_data={
+                    "detail": detail,
+                    "station_id": str(station.id),
+                    "station": station.name,
+                },
+            )
+        )
+
+
+async def _sync_station_geozone(db: DbSession, station: Station) -> None:
+    if station.influence_geojson or (station.latitude is not None and station.longitude is not None):
+        await ensure_station_plot(db, station)
 
 
 @router.get("")
@@ -30,9 +65,30 @@ async def create_station(payload: StationPayload, request: Request, db: DbSessio
     station = Station(**data, created_by=actor.id)
     db.add(station)
     await db.flush()
-    await write_audit(db, action="STATION_CREATE", user=actor, request=request, entity_type="station", entity_id=str(station.id), after=model_dict(station, exclude={"deleted_at"}))
+
+    # Los valores generados por PostgreSQL (created_at/updated_at) pueden
+    # quedar expirados después del flush. En AsyncSession no se debe permitir
+    # que model_dict dispare una carga implícita, porque produce MissingGreenlet.
+    await db.refresh(station)
+    station_data = model_dict(station, exclude={"deleted_at"})
+    await _sync_station_geozone(db, station)
+    await _mark_copernicus_retest_required(
+        db,
+        station,
+        "La estación fue creada o actualizada. Ejecute una prueba Copernicus para esta estación.",
+    )
+
+    await write_audit(
+        db,
+        action="STATION_CREATE",
+        user=actor,
+        request=request,
+        entity_type="station",
+        entity_id=str(station.id),
+        after=station_data,
+    )
     await db.commit()
-    return model_dict(station, exclude={"deleted_at"})
+    return station_data
 
 
 @router.put("/{station_id}")
@@ -47,8 +103,32 @@ async def update_station(station_id: uuid.UUID, payload: StationPayload, request
     for key, value in payload.model_dump(include=payload.model_fields_set).items():
         setattr(station, key, value.upper() if key == "code" else value)
     await db.flush()
+
+    # updated_at usa una expresión SQL onupdate. El flush expira ese atributo y
+    # accederlo de forma síncrona desde model_dict provoca MissingGreenlet.
+    # refresh realiza la lectura de forma explícita y esperada dentro del flujo async.
+    await db.refresh(station)
     after = model_dict(station, exclude={"deleted_at"})
-    await write_audit(db, action="STATION_UPDATE", user=actor, request=request, entity_type="station", entity_id=str(station.id), before=before, after=after)
+    geozone_fields = {"influence_geojson", "latitude", "longitude", "influence_radius_m"}
+    geozone_changed = any(before.get(field) != after.get(field) for field in geozone_fields)
+    if geozone_changed:
+        await _sync_station_geozone(db, station)
+        await _mark_copernicus_retest_required(
+            db,
+            station,
+            "Cambió el polígono, las coordenadas o el radio. La prueba anterior ya no representa esta geozona.",
+        )
+
+    await write_audit(
+        db,
+        action="STATION_UPDATE",
+        user=actor,
+        request=request,
+        entity_type="station",
+        entity_id=str(station.id),
+        before=before,
+        after=after,
+    )
     await db.commit()
     return after
 
@@ -58,7 +138,6 @@ async def delete_station(station_id: uuid.UUID, request: Request, db: DbSession,
     station = await db.get(Station, station_id)
     if not station or station.deleted_at:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
-    from datetime import UTC, datetime
     station.active = False
     station.deleted_at = datetime.now(UTC)
     await write_audit(db, action="STATION_DELETE", user=actor, request=request, entity_type="station", entity_id=str(station.id))

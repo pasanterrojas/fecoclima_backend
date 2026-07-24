@@ -10,7 +10,7 @@ from app.db.models import Plot, SatelliteObservation
 from app.schemas.actions import SatelliteObservationPayload, SatelliteSyncPayload
 from app.services.audit import write_audit
 from app.services.jobs import enqueue_job
-from app.services.satellite import search_copernicus_catalog
+from app.services.satellite import search_copernicus_catalog, sync_satellite_for_station
 from app.services.serialization import model_dict
 
 router = APIRouter(prefix="/satellite", tags=["Información satelital"])
@@ -57,6 +57,14 @@ async def search_catalog(payload: SatelliteSyncPayload, db: DbSession, actor: An
         return {"status": job.status, "job_id": str(job.id)}
     try:
         return await search_copernicus_catalog(db, payload.plot_id, payload.date_from, payload.date_to, payload.max_cloud_percentage)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/stations/{station_id}/sync")
+async def sync_station_satellite(station_id: UUID, db: DbSession, _: AnalystUser, force: bool = True) -> dict:
+    try:
+        return await sync_satellite_for_station(db, station_id, force=force)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

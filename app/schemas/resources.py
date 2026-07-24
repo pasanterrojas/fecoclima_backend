@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class StationPayload(BaseModel):
@@ -26,13 +26,34 @@ class StationPayload(BaseModel):
     integration_config: dict[str, Any] = Field(default_factory=dict)
     available_variables: list[str] = Field(default_factory=list)
     leaf_sensor_config: dict[str, Any] = Field(default_factory=dict)
+    influence_geojson: dict[str, Any] | str | None = None
+    influence_radius_m: int | None = Field(default=750, ge=10, le=100000)
     active: bool = True
+
+    @field_validator("influence_geojson", mode="before")
+    @classmethod
+    def parse_influence_geojson(cls, value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            import json
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("El polígono debe ser un GeoJSON válido") from exc
+        geometry = value.get("geometry") if isinstance(value, dict) and value.get("type") == "Feature" else value
+        if not isinstance(geometry, dict) or geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+            raise ValueError("El polígono debe ser GeoJSON Polygon o MultiPolygon")
+        coordinates = geometry.get("coordinates")
+        if not coordinates:
+            raise ValueError("El polígono no contiene coordenadas")
+        return value
 
 
 class PlotPayload(BaseModel):
     name: str
     producer_name: str | None = None
-    crop_id: UUID
+    crop_id: UUID | None = None
     station_id: UUID
     area_ha: float | None = Field(default=None, ge=0)
     latitude: float | None = Field(default=None, ge=-90, le=90)
@@ -91,19 +112,44 @@ class RulePayload(BaseModel):
         return value or {}
 
 
+class RuleClonePayload(BaseModel):
+    version: str = Field(min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=2, max_length=180)
+    description: str | None = None
+    effective_from: date | None = None
+
+
 class AgentPayload(BaseModel):
     name: str
     code: str
     crop_id: UUID | None = None
-    purpose: str | None = None
+    purpose: str = "CROP_ANALYSIS"
     description: str | None = None
     system_prompt: str | None = None
     model: str | None = None
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=1400, ge=100, le=20000)
     output_schema: dict[str, Any] | str = Field(default_factory=dict)
+    response_detail_level: str = "BRIEF"
+    response_max_words: int = Field(default=260, ge=100, le=1200)
+    response_max_sections: int = Field(default=4, ge=2, le=8)
+    response_tone: str = "DIRECT_FRIENDLY"
+    response_include_observed: bool = True
+    response_include_forecast: bool = True
+    response_include_satellite: bool = True
+    response_include_year_comparison: bool = True
+    response_include_sources: bool = False
+    response_show_technical_values: bool = False
+    response_show_system_details: bool = False
+    response_use_emojis: bool = True
+    response_custom_instructions: str | None = Field(default=None, max_length=2000)
     rag_collection: str | None = None
     active: bool = True
+
+    @field_validator("purpose", mode="before")
+    @classmethod
+    def normalize_purpose(cls, value):
+        return str(value or "CROP_ANALYSIS").strip().upper()
 
     @field_validator("output_schema", mode="before")
     @classmethod
@@ -112,6 +158,24 @@ class AgentPayload(BaseModel):
             import json
             return json.loads(value)
         return value or {}
+
+    @field_validator("response_detail_level", "response_tone", mode="before")
+    @classmethod
+    def normalize_response_controls(cls, value):
+        return str(value or "").strip().upper()
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        allowed = {"CROP_ANALYSIS", "SATELLITE_ANALYSIS", "PHENOLOGY_ANALYSIS", "YEAR_COMPARISON", "DAILY_DIGEST"}
+        if self.purpose not in allowed:
+            raise ValueError("Propósito de agente no soportado")
+        if self.purpose != "DAILY_DIGEST" and self.crop_id is None:
+            raise ValueError("Este propósito requiere seleccionar un cultivo")
+        if self.response_detail_level not in {"BRIEF", "BALANCED", "DETAILED"}:
+            raise ValueError("Nivel de detalle de respuesta no soportado")
+        if self.response_tone not in {"DIRECT_FRIENDLY", "SIMPLE_TECHNICAL", "INSTITUTIONAL"}:
+            raise ValueError("Tono de respuesta no soportado")
+        return self
 
 
 class KnowledgePayload(BaseModel):
@@ -187,8 +251,7 @@ class ReportCreate(BaseModel):
     station_id: UUID
     crop_code: str | None = None
     crop_id: UUID | None = None
-    cycle_id: UUID | None = None
-    crop_cycle_id: UUID | None = None
+    planting_date: date
     date_from: date
     date_to: date
 
@@ -200,13 +263,13 @@ class ReportCreate(BaseModel):
             raise ValueError("date_to no puede ser anterior a date_from")
         if start and (value - start).days > 366:
             raise ValueError("El reporte no puede superar 366 días")
+        planting_date = info.data.get("planting_date")
+        if planting_date and planting_date > value:
+            raise ValueError("La fecha de siembra no puede ser posterior al final del reporte")
         return value
 
 
 class PhenologyCalculate(BaseModel):
-    station_id: UUID | None = None
     crop_code: str
-    sowing_type: str = "directa"
-    cycle_type: str = "normal"
     planting_date: date
-    requirement: str = "etapa_actual"
+    on_date: date | None = None

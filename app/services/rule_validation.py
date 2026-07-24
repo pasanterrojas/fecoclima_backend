@@ -8,8 +8,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import BaseCondition, CropCycle, CropRuleVersion, DiseaseRule, WeatherDailySummary
-from app.services.alert_engine import ConditionSpec, evaluate_daily_alert
+from app.db.models import BaseCondition, CropRuleVersion, DiseaseRule, PhenologyStage, WeatherDailySummary
+from app.services.alert_engine import ConditionSpec, normalize_alert_configuration, evaluate_daily_alert
 from app.services.phenology import calculate_stage
 
 SUPPORTED_VARIABLES = {
@@ -64,6 +64,17 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
             )
         ).all()
     )
+    stage_codes = set(
+        (
+            await db.scalars(
+                select(PhenologyStage.code).where(
+                    PhenologyStage.crop_id == rule.crop_id,
+                    PhenologyStage.active.is_(True),
+                    PhenologyStage.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
     errors: list[str] = []
     warnings: list[str] = []
     if len(conditions) != 6:
@@ -91,12 +102,68 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
     for disease in diseases:
         if disease.enabled_for_evaluation and disease.validation_status != "PUBLISHED":
             errors.append(f"{disease.name}: está habilitada sin validación PUBLISHED")
-        if disease.validation_status == "PUBLISHED" and not disease.conditions:
+        condition_group = disease.conditions if isinstance(disease.conditions, dict) else {}
+        measurable = condition_group.get("all") if isinstance(condition_group.get("all"), list) else []
+        if disease.validation_status == "PUBLISHED" and not measurable:
             errors.append(f"{disease.name}: publicada sin condiciones medibles")
+        risk = str(condition_group.get("risk") or "moderado").lower()
+        if risk not in {"bajo", "moderado", "alto"}:
+            errors.append(f"{disease.name}: nivel de riesgo no soportado")
+        for index, condition in enumerate(measurable, start=1):
+            if not isinstance(condition, dict):
+                errors.append(f"{disease.name}: parámetro {index} no es un objeto válido")
+                continue
+            normalized_condition = {
+                "variable": condition.get("variable"),
+                "operator": condition.get("operator"),
+                "threshold_min": condition.get("min", condition.get("threshold_min")),
+                "threshold_max": condition.get("max", condition.get("threshold_max")),
+                "threshold_value": condition.get("value", condition.get("threshold_value")),
+            }
+            errors.extend(
+                f"{disease.name}, parámetro {index}: {message}"
+                for message in validate_condition_dict(normalized_condition)
+            )
+        unknown_stages = sorted(set(disease.valid_stages or []) - stage_codes)
+        if unknown_stages:
+            errors.append(
+                f"{disease.name}: etapas fenológicas no configuradas para el cultivo: "
+                + ", ".join(unknown_stages)
+            )
         if disease.validation_status == "PENDING_TECHNICAL":
             warnings.append(f"{disease.name}: pendiente de validación técnica y excluida del cálculo")
     if rule.effective_from and rule.effective_to and rule.effective_to < rule.effective_from:
         errors.append("effective_to no puede ser anterior a effective_from")
+
+    alert_config = normalize_alert_configuration(rule.configuration, len(conditions))
+    allowed_colors = {"green", "yellow", "orange", "red", "gray", "blue"}
+    if str(alert_config.get("missing_required_policy") or "").upper() not in {"DATOS_INSUFICIENTES", "CONTINUE"}:
+        errors.append("La política de datos faltantes debe ser DATOS_INSUFICIENTES o CONTINUE")
+    for code, item in alert_config["levels"].items():
+        if not str(item.get("label") or "").strip():
+            errors.append(f"{code}: requiere una etiqueta visible")
+        if str(item.get("color") or "").lower() not in allowed_colors:
+            errors.append(f"{code}: color no soportado")
+    ranges: list[tuple[int, int, str]] = []
+    for code in ("NINGUNA", "MODERADA", "GRAVE"):
+        item = alert_config["levels"][code]
+        start = int(item["min_conditions"])
+        end = int(item["max_conditions"])
+        if end < start:
+            errors.append(f"{code}: máximo menor que mínimo")
+        ranges.append((start, end, code))
+    covered: dict[int, str] = {}
+    for start, end, code in ranges:
+        for value in range(start, end + 1):
+            if value in covered:
+                errors.append(f"Los niveles {covered[value]} y {code} se superponen en {value} condiciones")
+            covered[value] = code
+    missing_counts = [str(value) for value in range(0, len(conditions) + 1) if value not in covered]
+    if missing_counts:
+        errors.append("Los niveles de alerta no cubren estas cantidades de condiciones: " + ", ".join(missing_counts))
+    minimum_completion = float(alert_config.get("minimum_completion_pct", 100))
+    if minimum_completion < 0 or minimum_completion > 100:
+        errors.append("La completitud mínima debe estar entre 0 y 100")
     return {
         "valid": not errors,
         "errors": errors,
@@ -109,18 +176,17 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
     }
 
 
-async def _stage_for_day(db: AsyncSession, cycle: CropCycle | None, day: date) -> str | None:
-    if not cycle:
+async def _stage_for_day(
+    db: AsyncSession, crop_id: UUID, planting_date: date | None, day: date
+) -> str | None:
+    if not planting_date:
         return None
-    from app.db.models import PhenologyStage
-
     stages = list(
         (
             await db.scalars(
                 select(PhenologyStage)
                 .where(
-                    PhenologyStage.crop_id == cycle.crop_id,
-                    PhenologyStage.cycle_type == (cycle.cycle_type or "normal"),
+                    PhenologyStage.crop_id == crop_id,
                     PhenologyStage.active.is_(True),
                     PhenologyStage.deleted_at.is_(None),
                 )
@@ -129,15 +195,11 @@ async def _stage_for_day(db: AsyncSession, cycle: CropCycle | None, day: date) -
         ).all()
     )
     result = calculate_stage(
-        cycle.planting_date,
-        day,
+        planting_date, day,
         [
             {
-                "code": item.code,
-                "name": item.name,
-                "description": item.description,
-                "order_index": item.order_index,
-                "start_day": item.start_day,
+                "code": item.code, "name": item.name, "description": item.description,
+                "order_index": item.order_index, "start_day": item.start_day,
                 "end_day": item.end_day,
             }
             for item in stages
@@ -152,7 +214,7 @@ async def simulate_rule(
     station_id: UUID,
     date_from: date,
     date_to: date,
-    crop_cycle_id: UUID | None = None,
+    planting_date: date | None = None,
 ) -> dict[str, Any]:
     rule = await db.get(CropRuleVersion, rule_id)
     if not rule:
@@ -179,7 +241,6 @@ async def simulate_rule(
             )
         ).all()
     )
-    cycle = await db.get(CropCycle, crop_cycle_id) if crop_cycle_id else None
     specs = [
         ConditionSpec(
             key=item.key,
@@ -231,13 +292,14 @@ async def simulate_rule(
             "solar_sum_wm2_samples": getattr(summary, "solar_sum_wm2_samples", None),
             "evapotranspiration_sum_mm": getattr(summary, "evapotranspiration_sum_mm", None),
         }
-        stage = await _stage_for_day(db, cycle, current)
+        stage = await _stage_for_day(db, rule.crop_id, planting_date, current)
         result = evaluate_daily_alert(
             values,
             specs,
             stage_code=stage,
             disease_rules=disease_specs,
             data_completeness=(summary.completeness_pct / 100) if summary else 0,
+            alert_configuration=rule.configuration,
         )
         days.append({"date": current.isoformat(), "stage_code": stage, **result})
         current += timedelta(days=1)
@@ -260,10 +322,10 @@ async def compare_rule_versions(
     station_id: UUID,
     date_from: date,
     date_to: date,
-    crop_cycle_id: UUID | None = None,
+    planting_date: date | None = None,
 ) -> dict[str, Any]:
-    first = await simulate_rule(db, first_rule_id, station_id, date_from, date_to, crop_cycle_id)
-    second = await simulate_rule(db, second_rule_id, station_id, date_from, date_to, crop_cycle_id)
+    first = await simulate_rule(db, first_rule_id, station_id, date_from, date_to, planting_date)
+    second = await simulate_rule(db, second_rule_id, station_id, date_from, date_to, planting_date)
     changes: list[dict[str, Any]] = []
     for a, b in zip(first["days"], second["days"], strict=True):
         if a["level"] != b["level"] or a["conditions_met"] != b["conditions_met"]:

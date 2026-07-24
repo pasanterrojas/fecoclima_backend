@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class DateRangePayload(BaseModel):
@@ -22,14 +23,14 @@ class DateRangePayload(BaseModel):
 
 class StationSyncPayload(DateRangePayload):
     crop_id: UUID | None = None
-    cycle_id: UUID | None = None
+    planting_date: date | None = None
     run_in_background: bool = True
 
 
 class AlertEvaluatePayload(DateRangePayload):
     station_id: UUID
     crop_id: UUID
-    crop_cycle_id: UUID | None = None
+    planting_date: date
     force_recalculate: bool = False
     run_in_background: bool = False
 
@@ -70,6 +71,19 @@ class SatelliteSyncPayload(BaseModel):
         if (self.date_to - self.date_from).days > 366:
             raise ValueError("La consulta satelital no puede superar 366 días")
         return self
+
+
+class PublicSatelliteRefreshPayload(BaseModel):
+    """Refresh Copernicus evidence for the public analysis context.
+
+    The crop is required because a station can have more than one geozone and
+    the satellite evidence shown to the agent must correspond to the selected
+    crop whenever a crop-specific parcel exists.
+    """
+
+    station_id: UUID
+    crop_code: str = Field(min_length=1, max_length=30)
+    force: bool = True
 
 
 class PhenologyStagePayload(BaseModel):
@@ -144,7 +158,7 @@ class DiseaseRulePayload(BaseModel):
 
 class RuleSimulationPayload(DateRangePayload):
     station_id: UUID
-    crop_cycle_id: UUID | None = None
+    planting_date: date | None = None
     persist: bool = False
 
 
@@ -158,6 +172,7 @@ class BackgroundJobPayload(BaseModel):
         "SATELLITE_SYNC",
         "DATABASE_BACKUP",
         "CLEANUP_FILES",
+        "DAILY_PRODUCER_DIGEST",
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
@@ -171,3 +186,51 @@ class BackupCreatePayload(BaseModel):
 
 class PublicReportAccessPayload(BaseModel):
     public_access: bool
+
+
+class PhenologyAgentPayload(BaseModel):
+    station_id: UUID
+    crop_code: str = Field(min_length=1, max_length=30)
+    planting_date: date
+    cycle_type: str = Field(default="normal", min_length=1, max_length=80)
+    force: bool = False
+
+
+class NotificationContextPayload(BaseModel):
+    station_id: UUID
+    crop_code: str = Field(min_length=1, max_length=30)
+    planting_date: date
+    label: str | None = Field(default=None, max_length=180)
+
+
+class ProducerNotificationSettingsPayload(BaseModel):
+    active: bool = False
+    timezone: str = Field(default="America/Asuncion", min_length=1, max_length=80)
+    send_hour: int = Field(default=6, ge=0, le=23)
+    email_enabled: bool = False
+    recipients: list[EmailStr] = Field(default_factory=list)
+    telegram_enabled: bool = False
+    telegram_chat_id: str | None = Field(default=None, max_length=120)
+    telegram_bot_token: str | None = Field(default=None, max_length=300)
+    contexts: list[NotificationContextPayload] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_channels(self):
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("La zona horaria no es válida") from exc
+        self.recipients = sorted({str(item).strip().lower() for item in self.recipients if str(item).strip()})
+        if self.email_enabled and not self.recipients:
+            raise ValueError("Agregue al menos un destinatario de correo")
+        if self.telegram_enabled and not self.telegram_chat_id:
+            raise ValueError("Ingrese el chat_id de Telegram")
+        if self.active and not self.contexts:
+            raise ValueError("Agregue al menos una estación, cultivo y fecha de siembra")
+        return self
+
+
+class AgentAnalysisPayload(BaseModel):
+    alert_id: UUID
+    period: Literal["24h", "72h", "7d", "30d"] = "72h"
+    force: bool = False

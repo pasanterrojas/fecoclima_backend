@@ -50,6 +50,13 @@ async def schedule_station_jobs() -> None:
                     priority=80,
                 )
                 scheduled += int(job is not None)
+                satellite_job = await enqueue_unique(
+                    db,
+                    "SATELLITE_SYNC",
+                    {"station_id": str(station.id)},
+                    priority=120,
+                )
+                scheduled += int(satellite_job is not None)
     logger.info("scheduled_station_jobs", stations=len(stations), jobs=scheduled)
 
 
@@ -70,6 +77,18 @@ async def schedule_backup() -> None:
         )
 
 
+async def schedule_daily_digest() -> None:
+    """La configuración del CMS decide hora local y evita duplicados diarios."""
+    async with AsyncSessionLocal() as db:
+        hour_key = datetime.now(UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+        await enqueue_unique(
+            db,
+            "DAILY_PRODUCER_DIGEST",
+            {"force": False, "hour_key": hour_key},
+            priority=40,
+        )
+
+
 async def main() -> None:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -81,6 +100,14 @@ async def main() -> None:
         next_run_time=datetime.now(UTC) + timedelta(seconds=10),
     )
     scheduler.add_job(schedule_cleanup, "cron", hour=3, minute=20, max_instances=1, coalesce=True)
+    scheduler.add_job(
+        schedule_daily_digest,
+        "interval",
+        minutes=30,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(UTC) + timedelta(seconds=45),
+    )
     scheduler.add_job(
         schedule_backup,
         "cron",

@@ -39,3 +39,55 @@ def test_no_rule_configuration_is_insufficient():
 
 def test_maximum_ignores_insufficient_when_valid_days_exist():
     assert maximum_level([{"level": "DATOS_INSUFICIENTES"}, {"level": "NINGUNA"}, {"level": "MODERADA"}]) == "MODERADA"
+
+
+def test_alert_thresholds_and_colors_come_from_rule_configuration():
+    values = {
+        "temperature_avg_c": 25,
+        "humidity_avg_pct": 90,
+        "rain_sum_mm": 1,
+        "soil_temperature_avg_c": 30,
+        "leaf_wetness_hours": 2,
+        "soil_moisture_avg_pct": 30,
+    }
+    configuration = {
+        "alert": {
+            "levels": {
+                "NINGUNA": {"label": "Normal", "color": "green", "min_conditions": 0, "max_conditions": 1},
+                "MODERADA": {"label": "Vigilancia", "color": "orange", "min_conditions": 2, "max_conditions": 3},
+                "GRAVE": {"label": "Crítica", "color": "red", "min_conditions": 4, "max_conditions": 6},
+                "DATOS_INSUFICIENTES": {"label": "Sin cobertura", "color": "blue"},
+            },
+            "minimum_completion_pct": 100,
+            "missing_required_policy": "DATOS_INSUFICIENTES",
+        }
+    }
+    result = evaluate_daily_alert(values, specs(), alert_configuration=configuration)
+    assert result["conditions_met"] == 3
+    assert result["level"] == "MODERADA"
+    assert result["level_label"] == "Vigilancia"
+    assert result["level_color"] == "orange"
+
+
+def test_configured_completion_policy_prevents_colored_alert_with_missing_data():
+    values = {
+        "temperature_avg_c": 25,
+        "humidity_avg_pct": 90,
+        "rain_sum_mm": 1,
+        "soil_temperature_avg_c": None,
+        "leaf_wetness_hours": 8,
+        "soil_moisture_avg_pct": 65,
+    }
+    configuration = {
+        "alert": {
+            "levels": {
+                "DATOS_INSUFICIENTES": {"label": "Revisar sensores", "color": "blue"},
+            },
+            "minimum_completion_pct": 90,
+            "missing_required_policy": "DATOS_INSUFICIENTES",
+        }
+    }
+    result = evaluate_daily_alert(values, specs(), alert_configuration=configuration)
+    assert result["level"] == "DATOS_INSUFICIENTES"
+    assert result["level_label"] == "Revisar sensores"
+    assert result["level_color"] == "blue"

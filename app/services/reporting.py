@@ -19,9 +19,9 @@ from app.core.config import settings
 from app.db.models import (
     AlertEvaluation,
     Crop,
-    CropCycle,
     Report,
     ReportFile,
+    Plot,
     SatelliteObservation,
     Station,
     WeatherDailySummary,
@@ -29,6 +29,8 @@ from app.db.models import (
 )
 from app.services.agent_runtime import run_agent_for_alert
 from app.services.alert_engine import LEVEL_ORDER
+from app.services.disease_forecast import build_forecast_risk
+from app.services.phenology import calculate_stage
 
 PRIMARY = colors.HexColor("#004481")
 SECONDARY = colors.HexColor("#3B8DC2")
@@ -107,7 +109,6 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
     await db.commit()
     station = await db.get(Station, report.station_id)
     crop = await db.get(Crop, report.crop_id)
-    cycle = await db.get(CropCycle, report.crop_cycle_id) if report.crop_cycle_id else None
     daily = list(
         (
             await db.scalars(
@@ -128,9 +129,7 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
                 .where(
                     AlertEvaluation.station_id == report.station_id,
                     AlertEvaluation.crop_id == report.crop_id,
-                    AlertEvaluation.crop_cycle_id == report.crop_cycle_id
-                    if report.crop_cycle_id
-                    else AlertEvaluation.crop_cycle_id.is_(None),
+                    AlertEvaluation.planting_date == report.planting_date,
                     AlertEvaluation.evaluation_date >= report.date_from,
                     AlertEvaluation.evaluation_date <= report.date_to,
                 )
@@ -151,16 +150,39 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
             )
         ).all()
     )
+    plot = await db.scalar(
+        select(Plot)
+        .where(
+            Plot.station_id == report.station_id,
+            Plot.active.is_(True),
+            Plot.deleted_at.is_(None),
+        )
+        .order_by(Plot.updated_at.desc(), Plot.created_at.desc())
+        .limit(1)
+    )
     satellite = None
-    if cycle and cycle.plot_id:
+    if plot:
         satellite = await db.scalar(
             select(SatelliteObservation)
-            .where(SatelliteObservation.plot_id == cycle.plot_id)
+            .where(SatelliteObservation.plot_id == plot.id)
             .order_by(SatelliteObservation.captured_at.desc())
             .limit(1)
         )
     alert_by_date = {item.evaluation_date: item for item in alerts}
     worst_alert = max(alerts, key=lambda item: LEVEL_ORDER.get(item.level, -1), default=None)
+    stages = []
+    if crop:
+        from app.db.models import PhenologyStage
+        stages = list((await db.scalars(
+            select(PhenologyStage)
+            .where(PhenologyStage.crop_id == crop.id, PhenologyStage.active.is_(True), PhenologyStage.deleted_at.is_(None))
+            .order_by(PhenologyStage.order_index)
+        )).all())
+    phenology = calculate_stage(
+        report.planting_date, report.date_to,
+        [{"code": x.code, "name": x.name, "description": x.description, "order_index": x.order_index, "start_day": x.start_day, "end_day": x.end_day} for x in stages],
+    ) if report.planting_date else {}
+    forecast_risk = await build_forecast_risk(db, report.crop_id, report.planting_date, forecasts) if report.planting_date else {"days": [], "diseases": []}
     recommendation = None
     if worst_alert:
         recommendation = await run_agent_for_alert(
@@ -177,6 +199,8 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
                 }
                 for row in forecasts
             ],
+            phenology=phenology,
+            forecast_risk=forecast_risk,
             satellite=(
                 {
                     "captured_at": satellite.captured_at.isoformat(),
@@ -216,8 +240,8 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
         ["Estación", station.name],
         ["Ubicación", ", ".join(filter(None, [station.locality, station.district, station.department])) or "No registrada"],
         ["Cultivo", crop.name],
-        ["Ciclo", cycle.name if cycle else "No seleccionado"],
-        ["Fecha de siembra", cycle.planting_date.isoformat() if cycle else "No disponible"],
+        ["Fecha de siembra", report.planting_date.isoformat() if report.planting_date else "No disponible"],
+        ["Etapa estimada", phenology.get("stage_name") or "No disponible"],
         ["Periodo", f"{report.date_from.isoformat()} a {report.date_to.isoformat()}"],
         ["Generado", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")],
         ["Versión de regla", report.rule_version or "No disponible"],
@@ -275,11 +299,46 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
         story += [forecast_table, Paragraph("Los datos pronosticados se muestran separados de las lecturas observadas.", styles["FCSmall"])]
     else:
         story += [Paragraph("No había pronóstico almacenado para la estación al generar el reporte.", styles["FCBody"])]
+    story += [Paragraph("Riesgo potencial según el pronóstico", styles["FCHeading"])]
+    projected_days = forecast_risk.get("days", []) if forecast_risk else []
+    if projected_days:
+        risk_rows = [["Fecha", "Etapa", "Condiciones", "Cobertura", "Nivel potencial"]]
+        for item in projected_days:
+            risk_rows.append([
+                item.get("date"),
+                item.get("stage_code") or "—",
+                f"{item.get('conditions_met', 0)} de {item.get('conditions_total', 0)}",
+                f"{item.get('coverage_pct', 0):.0f}%",
+                item.get("potential_level"),
+            ])
+        risk_table = Table(risk_rows, repeatRows=1, colWidths=[3.0*cm, 2.7*cm, 3.1*cm, 2.4*cm, 3.3*cm])
+        risk_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), PRIMARY), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("FONTSIZE", (0,0), (-1,-1), 7), ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#C8D8E2"))]))
+        story += [risk_table, Paragraph("El nivel es potencial y no sustituye la alerta oficial basada en observaciones completas.", styles["FCSmall"])]
+    else:
+        story += [Paragraph("No había pronóstico evaluable para calcular riesgo potencial.", styles["FCBody"])]
+    story += [Paragraph("Proyección de enfermedades", styles["FCHeading"])]
+    projected = forecast_risk.get("diseases", []) if forecast_risk else []
+    if projected:
+        projection_rows = [["Enfermedad", "Riesgo potencial", "Fechas", "Fuente"]]
+        for item in projected:
+            projection_rows.append([item.get("name"), item.get("risk"), ", ".join(item.get("dates", [])), item.get("source") or "Regla publicada"] )
+        projection_table = Table(projection_rows, repeatRows=1, colWidths=[4.2*cm, 2.4*cm, 4.5*cm, 5.1*cm])
+        projection_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), SECONDARY), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("FONTSIZE", (0,0), (-1,-1), 7), ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#C8D8E2")), ("VALIGN", (0,0), (-1,-1), "TOP")]))
+        story += [projection_table, Paragraph("Esta sección es una proyección no diagnóstica basada en variables pronosticadas y reglas publicadas.", styles["FCSmall"])]
+    else:
+        story += [Paragraph("No se identificaron coincidencias con reglas completamente evaluables.", styles["FCBody"])]
+    unresolved = forecast_risk.get("unresolved_diseases", []) if forecast_risk else []
+    if unresolved:
+        limitations = [
+            f"{item.get('name')}: faltan {', '.join(item.get('missing_variables', []))}"
+            for item in unresolved
+        ]
+        story += [Paragraph("Reglas no proyectadas por falta de variables", styles["FCHeading"]), *_paragraph_list(limitations, styles["FCSmall"])]
     story += [Paragraph("Información satelital", styles["FCHeading"])]
     if satellite:
         story += [Paragraph(f"Observación más reciente: {satellite.captured_at.isoformat()} · proveedor {escape(satellite.provider)} · nubosidad {satellite.cloud_percentage if satellite.cloud_percentage is not None else 'sin dato'}% · NDVI {satellite.ndvi if satellite.ndvi is not None else 'sin dato'} · NDMI {satellite.ndmi if satellite.ndmi is not None else 'sin dato'}.", styles["FCBody"]), Paragraph("La observación satelital describe el estado de la superficie; no es una predicción meteorológica.", styles["FCSmall"])]
     else:
-        story += [Paragraph("No existe una observación satelital asociada al ciclo o parcela.", styles["FCBody"])]
+        story += [Paragraph("No existe una observación satelital asociada a una parcela geográfica de la estación.", styles["FCBody"])]
     story += [Paragraph("Recomendación del agente", styles["FCHeading"])]
     if recommendation:
         story += [Paragraph(escape(recommendation.get("resumen", "")), styles["FCBody"]), Paragraph(escape(recommendation.get("explicacion_alerta", "")), styles["FCBody"])]

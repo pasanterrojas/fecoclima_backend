@@ -39,7 +39,16 @@ class Settings(BaseSettings):
     fecoclima_retry_count: int = 3
 
     open_meteo_base_url: str = "https://api.open-meteo.com/v1"
-    copernicus_stac_search_url: str | None = None
+    copernicus_stac_search_url: str = "https://stac.dataspace.copernicus.eu/v1/search"
+    copernicus_client_id: str | None = None
+    copernicus_client_secret: str | None = None
+    copernicus_token_url: str = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+    copernicus_process_url: str = "https://sh.dataspace.copernicus.eu/process/v1"
+    copernicus_statistics_url: str = "https://sh.dataspace.copernicus.eu/statistics/v1"
+    satellite_lookback_days: int = 60
+    satellite_max_cloud_percentage: float = 40.0
+    satellite_auto_radius_m: int = 750
+    satellite_refresh_hours: int = 24
     external_http_timeout_seconds: int = 45
     ai_base_url: str | None = None
     ai_api_key: str | None = None
@@ -62,6 +71,9 @@ class Settings(BaseSettings):
     report_retention_days: int = 365
     load_demo_data: bool = False
     scheduler_sync_minutes: int = 30
+    public_analysis_sync_enabled: bool = True
+    public_analysis_sync_cooldown_minutes: int = 10
+    public_analysis_sync_lookback_days: int = 3
     scheduler_backup_enabled: bool = False
     scheduler_backup_hour_utc: int = 2
     worker_poll_seconds: int = 4
@@ -128,6 +140,7 @@ def get_settings() -> Settings:
     (config.storage_path / "backups").mkdir(parents=True, exist_ok=True)
     (config.storage_path / "exports").mkdir(parents=True, exist_ok=True)
     (config.storage_path / "error-reports").mkdir(parents=True, exist_ok=True)
+    (config.storage_path / "satellite").mkdir(parents=True, exist_ok=True)
     return config
 
 
