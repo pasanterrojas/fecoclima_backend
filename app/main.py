@@ -76,7 +76,10 @@ async def security_and_logging(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith(settings.api_v1_prefix) else "no-cache"
+    if "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = (
+            "no-store" if request.url.path.startswith(settings.api_v1_prefix) else "no-cache"
+        )
     if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
     if settings.is_production:
@@ -95,13 +98,38 @@ async def security_and_logging(request: Request, call_next):
     return response
 
 
+def _serializable_validation_errors(exc: RequestValidationError) -> list[dict]:
+    errors: list[dict] = []
+    for item in exc.errors():
+        clean = dict(item)
+        ctx = clean.get("ctx")
+        if isinstance(ctx, dict):
+            clean["ctx"] = {
+                key: str(value) if isinstance(value, BaseException) else value
+                for key, value in ctx.items()
+            }
+        input_value = clean.get("input")
+        try:
+            import orjson
+            orjson.dumps(input_value)
+        except Exception:
+            clean["input"] = str(input_value)
+        errors.append(clean)
+    return errors
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
+    errors = _serializable_validation_errors(exc)
+    message = next(
+        (str(item.get("msg", "")).removeprefix("Value error, ").strip() for item in errors if item.get("msg")),
+        "Datos de entrada inválidos",
+    )
     return ORJSONResponse(
         status_code=422,
         content={
-            "detail": "Datos de entrada inválidos",
-            "errors": exc.errors(),
+            "detail": message or "Datos de entrada inválidos",
+            "errors": errors,
             "request_id": getattr(request.state, "request_id", None),
         },
     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage
 from html import escape
@@ -14,13 +16,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.crypto import decrypt_secret
-from app.db.models import Crop, IntegrationConfig, IntegrationLog, Station
+from app.db.models import Crop, IntegrationConfig, IntegrationLog, Station, TelegramSubscriber
 from app.services.agent_runtime import run_agent_for_alert
 from app.services.source_refresh import refresh_station_source_if_needed
 from app.services.weather import aggregate_range, evaluate_alert_for_day
 
 CONFIG_NAME = "Avisos diarios a productores"
 PROVIDER = "EMAIL_TELEGRAM_DIGEST"
+ALERT_ORDER = {"DATOS_INSUFICIENTES": -1, "NINGUNA": 0, "MODERADA": 1, "GRAVE": 2}
+
+
+class TelegramAPIError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, error_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 def default_config() -> dict[str, Any]:
@@ -31,7 +41,12 @@ def default_config() -> dict[str, Any]:
         "email_enabled": False,
         "recipients": [],
         "telegram_enabled": False,
-        "telegram_chat_id": "",
+        "telegram_minimum_level": "MODERADA",
+        "telegram_update_offset": 0,
+        "telegram_bot_username": None,
+        "telegram_bot_name": None,
+        "telegram_last_sync_at": None,
+        "telegram_polling_initialized": False,
         "contexts": [],
         "last_delivery_date": None,
     }
@@ -58,6 +73,20 @@ async def get_notification_integration(db: AsyncSession, *, create: bool = False
         db.add(row)
         await db.flush()
     return row
+
+
+def telegram_bot_token(integration: IntegrationConfig | None) -> str:
+    """Return the BotFather token, including compatibility with the old JSON bundle."""
+    decrypted = decrypt_secret(integration.encrypted_secret) if integration else None
+    if not decrypted:
+        return ""
+    try:
+        payload = json.loads(decrypted)
+    except json.JSONDecodeError:
+        return decrypted.strip()
+    if isinstance(payload, dict):
+        return str(payload.get("token") or payload.get("bot_token") or "").strip()
+    return decrypted.strip()
 
 
 def _markdown_to_plain(markdown: str) -> str:
@@ -110,13 +139,11 @@ def _markdown_to_html(markdown: str) -> str:
 
 
 def _email_message(recipient: str, subject: str, markdown: str) -> EmailMessage:
-    """Build one message per producer so recipient addresses stay private."""
     message = EmailMessage()
     message["From"] = settings.smtp_from
     message["To"] = recipient
     message["Subject"] = subject
-    plain = _markdown_to_plain(markdown)
-    message.set_content(plain)
+    message.set_content(_markdown_to_plain(markdown))
     message.add_alternative(
         "<html><body style='font-family:Arial,sans-serif;line-height:1.55;color:#18364a'>"
         "<div style='max-width:760px;margin:auto;padding:24px'>"
@@ -131,8 +158,6 @@ def _email_message(recipient: str, subject: str, markdown: str) -> EmailMessage:
 async def _send_email(recipients: list[str], subject: str, markdown: str) -> None:
     if not settings.smtp_host:
         raise RuntimeError("SMTP_HOST no está configurado")
-    # Se envía un mensaje individual por destinatario. Así ningún productor
-    # recibe ni puede ver las direcciones de los demás miembros de la lista.
     for recipient in recipients:
         await aiosmtplib.send(
             _email_message(recipient, subject, markdown),
@@ -145,23 +170,58 @@ async def _send_email(recipients: list[str], subject: str, markdown: str) -> Non
         )
 
 
-async def telegram_request(token: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def telegram_request(
+    token: str,
+    method: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    if not token:
+        raise TelegramAPIError("Telegram: falta el token del bot")
     url = f"https://api.telegram.org/bot{token}/{method}"
-    async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post(url, json=payload or {})
-    try:
-        data = response.json()
-    except Exception as exc:
-        raise RuntimeError(f"Telegram respondió HTTP {response.status_code} sin JSON válido") from exc
-    if response.status_code >= 400 or not data.get("ok"):
-        description = data.get("description") or response.text[:1000]
-        raise RuntimeError(f"Telegram: {description}")
-    return data
+    retryable = {408, 425, 429, 500, 502, 503, 504}
+    last_error: TelegramAPIError | None = None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=15)) as client:
+        for attempt in range(max(1, attempts)):
+            try:
+                response = await client.post(url, json=payload or {})
+            except httpx.RequestError as exc:
+                last_error = TelegramAPIError(f"Telegram: {type(exc).__name__}: {str(exc)[:500]}")
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(min(0.5 * (2**attempt), 4))
+                    continue
+                raise last_error from exc
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise TelegramAPIError(
+                    f"Telegram respondió HTTP {response.status_code} sin JSON válido",
+                    status_code=response.status_code,
+                ) from exc
+            if response.status_code < 400 and data.get("ok"):
+                return data
+            description = str(data.get("description") or response.text[:1000])
+            error = TelegramAPIError(
+                f"Telegram: {description}",
+                status_code=response.status_code,
+                error_code=data.get("error_code"),
+            )
+            last_error = error
+            if response.status_code in retryable and attempt + 1 < attempts:
+                retry_after = ((data.get("parameters") or {}).get("retry_after"))
+                try:
+                    delay = max(0.5, min(float(retry_after), 10)) if retry_after is not None else min(0.5 * (2**attempt), 4)
+                except (TypeError, ValueError):
+                    delay = min(0.5 * (2**attempt), 4)
+                await asyncio.sleep(delay)
+                continue
+            raise error
+    raise last_error or TelegramAPIError("Telegram no respondió")
 
 
-async def _send_telegram(token: str, chat_id: str, markdown: str) -> None:
+def _telegram_chunks(markdown: str) -> list[str]:
     plain = _markdown_to_plain(markdown)
-    # Telegram limita sendMessage; dividimos sin cortar palabras en bloques manejables.
     chunks: list[str] = []
     remaining = plain
     while remaining:
@@ -173,12 +233,265 @@ async def _send_telegram(token: str, chat_id: str, markdown: str) -> None:
             split = 3900
         chunks.append(remaining[:split].strip())
         remaining = remaining[split:].strip()
-    for chunk in chunks:
-        await telegram_request(token, "sendMessage", {
-            "chat_id": chat_id,
-            "text": chunk,
-            "disable_web_page_preview": True,
-        })
+    return chunks
+
+
+async def _send_telegram(token: str, chat_id: str, markdown: str) -> None:
+    for chunk in _telegram_chunks(markdown):
+        await telegram_request(
+            token,
+            "sendMessage",
+            {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
+        )
+
+
+def telegram_subscriber_payload(row: TelegramSubscriber) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "chat_id": row.chat_id,
+        "chat_type": row.chat_type,
+        "title": row.title or row.username or row.first_name or row.chat_id,
+        "username": row.username,
+        "first_name": row.first_name,
+        "last_name": row.last_name,
+        "active": row.active,
+        "minimum_level": row.minimum_level,
+        "subscribed_at": row.subscribed_at,
+        "unsubscribed_at": row.unsubscribed_at,
+        "last_delivery_at": row.last_delivery_at,
+        "last_error": row.last_error,
+    }
+
+
+async def active_telegram_subscribers(db: AsyncSession, integration_id: UUID) -> list[TelegramSubscriber]:
+    return list(
+        (
+            await db.scalars(
+                select(TelegramSubscriber)
+                .where(
+                    TelegramSubscriber.integration_id == integration_id,
+                    TelegramSubscriber.active.is_(True),
+                )
+                .order_by(TelegramSubscriber.subscribed_at, TelegramSubscriber.created_at)
+            )
+        ).all()
+    )
+
+
+def _telegram_message(update: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+        value = update.get(key)
+        if isinstance(value, dict):
+            return value
+    membership = update.get("my_chat_member")
+    if isinstance(membership, dict):
+        return membership
+    return None
+
+
+def telegram_chat_from_update(update: dict[str, Any]) -> dict[str, Any] | None:
+    message = _telegram_message(update)
+    chat = message.get("chat") if isinstance(message, dict) else None
+    if not isinstance(chat, dict) or chat.get("id") is None:
+        return None
+    return {
+        "chat_id": str(chat["id"]),
+        "chat_type": str(chat.get("type") or "unknown"),
+        "title": chat.get("title") or chat.get("username") or chat.get("first_name") or str(chat["id"]),
+        "username": chat.get("username"),
+        "first_name": chat.get("first_name"),
+        "last_name": chat.get("last_name"),
+    }
+
+
+def _telegram_command(update: dict[str, Any]) -> str | None:
+    message = _telegram_message(update)
+    text = str(message.get("text") or "").strip() if isinstance(message, dict) else ""
+    if not text.startswith("/"):
+        return None
+    return text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+
+
+async def process_telegram_update(
+    db: AsyncSession,
+    integration: IntegrationConfig,
+    token: str,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    chat = telegram_chat_from_update(update)
+    if not chat:
+        return {"action": "IGNORED", "reason": "no_chat"}
+    subscriber = await db.scalar(
+        select(TelegramSubscriber).where(
+            TelegramSubscriber.integration_id == integration.id,
+            TelegramSubscriber.chat_id == chat["chat_id"],
+        )
+    )
+    command = _telegram_command(update)
+    membership = update.get("my_chat_member") if isinstance(update.get("my_chat_member"), dict) else None
+    new_status = str(((membership or {}).get("new_chat_member") or {}).get("status") or "")
+    now = datetime.now(UTC)
+    response_text: str | None = None
+    action = "IGNORED"
+
+    if command in {"/start", "/subscribe", "/suscribir"}:
+        if not subscriber:
+            subscriber = TelegramSubscriber(integration_id=integration.id, chat_id=chat["chat_id"])
+            db.add(subscriber)
+        subscriber.chat_type = chat["chat_type"]
+        subscriber.title = chat["title"]
+        subscriber.username = chat["username"]
+        subscriber.first_name = chat["first_name"]
+        subscriber.last_name = chat["last_name"]
+        subscriber.active = True
+        subscriber.minimum_level = str((integration.non_sensitive_config or {}).get("telegram_minimum_level") or "MODERADA")
+        subscriber.subscribed_at = now
+        subscriber.unsubscribed_at = None
+        subscriber.last_error = None
+        action = "SUBSCRIBED"
+        response_text = (
+            "✅ Suscripción activada. FECOCLIMA IA enviará como máximo un boletín diario "
+            f"cuando el nivel sea {subscriber.minimum_level.lower()} o superior.\n\n"
+            "Use /status para consultar el estado o /stop para cancelar.\n"
+            "La aplicación procesa las suscripciones automáticamente; no necesita compartir su Chat ID."
+        )
+    elif command in {"/stop", "/unsubscribe", "/salir"}:
+        if subscriber:
+            subscriber.active = False
+            subscriber.unsubscribed_at = now
+        action = "UNSUBSCRIBED"
+        response_text = "Suscripción desactivada. Puede volver a activarla con /start."
+    elif command == "/status":
+        active = bool(subscriber and subscriber.active)
+        action = "STATUS"
+        response_text = (
+            f"Estado: {'activo' if active else 'inactivo'}. "
+            + (f"Umbral: {subscriber.minimum_level}." if active and subscriber else "Use /start para suscribirse.")
+        )
+    elif new_status in {"kicked", "left"}:
+        if subscriber:
+            subscriber.active = False
+            subscriber.unsubscribed_at = now
+        action = "DEACTIVATED_BY_MEMBERSHIP"
+    elif command:
+        action = "HELP"
+        response_text = "Comandos disponibles: /start, /status y /stop."
+
+    if subscriber:
+        try:
+            subscriber.last_update_id = int(update.get("update_id")) if update.get("update_id") is not None else subscriber.last_update_id
+        except (TypeError, ValueError):
+            pass
+    await db.commit()
+    if response_text:
+        await _send_telegram(token, chat["chat_id"], response_text)
+    return {"action": action, "chat_id": chat["chat_id"]}
+
+
+async def sync_telegram_subscriptions(
+    db: AsyncSession,
+    integration: IntegrationConfig | None = None,
+) -> dict[str, Any]:
+    """Read pending Bot API updates and persist /start, /status and /stop commands.
+
+    This integration intentionally uses getUpdates instead of a webhook. It works
+    in local development and production without exposing a public callback URL.
+    Exactly one scheduler/worker stack should poll a given bot token.
+    """
+    integration = integration or await get_notification_integration(db)
+    if not integration:
+        return {"status": "SKIPPED", "reason": "not_configured", "processed": 0}
+    token = telegram_bot_token(integration)
+    if not token:
+        return {"status": "SKIPPED", "reason": "token_missing", "processed": 0}
+
+    config = {**default_config(), **(integration.non_sensitive_config or {})}
+    bot = {
+        "username": config.get("telegram_bot_username"),
+        "first_name": config.get("telegram_bot_name"),
+    }
+    if not config.get("telegram_polling_initialized"):
+        webhook = (await telegram_request(token, "getWebhookInfo")).get("result") or {}
+        if webhook.get("url"):
+            await telegram_request(token, "deleteWebhook", {"drop_pending_updates": False})
+        bot = (await telegram_request(token, "getMe")).get("result") or bot
+        config["telegram_polling_initialized"] = True
+
+    offset = int(config.get("telegram_update_offset") or 0)
+    response = await telegram_request(
+        token,
+        "getUpdates",
+        {
+            "offset": offset,
+            "limit": 100,
+            "timeout": 0,
+            "allowed_updates": ["message", "edited_message", "channel_post", "my_chat_member"],
+        },
+    )
+    updates = list(response.get("result") or [])
+    processed: list[dict[str, Any]] = []
+    for update in updates:
+        processed.append(await process_telegram_update(db, integration, token, update))
+
+    if updates:
+        config["telegram_update_offset"] = max(int(item.get("update_id") or 0) for item in updates) + 1
+    config["telegram_bot_username"] = bot.get("username")
+    config["telegram_bot_name"] = bot.get("first_name") or bot.get("username")
+    config["telegram_last_sync_at"] = datetime.now(UTC).isoformat()
+    config.pop("telegram_chat_id", None)
+    config.pop("telegram_webhook_url", None)
+    integration.non_sensitive_config = config
+    await db.commit()
+    return {
+        "status": "COMPLETED",
+        "processed": len(processed),
+        "actions": processed,
+        "bot": {
+            "id": bot.get("id"),
+            "username": bot.get("username"),
+            "name": bot.get("first_name"),
+        },
+        "polling": True,
+    }
+
+
+def _terminal_telegram_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(value in text for value in ("bot was blocked", "chat not found", "forbidden", "user is deactivated", "bot was kicked"))
+
+
+async def send_telegram_to_subscribers(
+    db: AsyncSession,
+    integration: IntegrationConfig,
+    token: str,
+    markdown: str,
+) -> dict[str, Any]:
+    subscribers = await active_telegram_subscribers(db, integration.id)
+    if not subscribers:
+        raise RuntimeError(
+            "No hay suscriptores de Telegram. Abra el enlace del bot, pulse Iniciar y luego sincronice las suscripciones."
+        )
+
+    sent: list[str] = []
+    failed: list[dict[str, str]] = []
+    for subscriber in subscribers:
+        chat_id = subscriber.chat_id
+        try:
+            await _send_telegram(token, chat_id, markdown)
+            sent.append(chat_id)
+            subscriber.last_delivery_at = datetime.now(UTC)
+            subscriber.last_error = None
+        except Exception as exc:
+            message = str(exc)[:1000]
+            failed.append({"chat_id": chat_id, "error": message})
+            subscriber.last_error = message
+            if _terminal_telegram_error(exc):
+                subscriber.active = False
+                subscriber.unsubscribed_at = datetime.now(UTC)
+        await db.commit()
+    if not sent:
+        raise RuntimeError("Telegram no pudo entregar el boletín a ningún suscriptor: " + " | ".join(item["error"] for item in failed[:3]))
+    return {"sent": len(sent), "failed": failed}
 
 
 async def _context_digest(
@@ -186,6 +499,8 @@ async def _context_digest(
     context: dict[str, Any],
     *,
     synced_station_ids: set[UUID],
+    minimum_level: str,
+    include_below_threshold: bool = False,
 ) -> dict[str, Any]:
     station = await db.get(Station, UUID(str(context["station_id"])))
     crop = await db.scalar(select(Crop).where(Crop.code == str(context["crop_code"]).upper(), Crop.deleted_at.is_(None)))
@@ -197,38 +512,41 @@ async def _context_digest(
     timezone = ZoneInfo(station.timezone or "America/Asuncion")
     today = datetime.now(timezone).date()
     date_from = today - timedelta(days=2)
-    # Una estación puede aparecer en varios cultivos. Sincronizamos FECOCLIMA
-    # una sola vez por boletín y reutilizamos las lecturas recién almacenadas.
     if station.id not in synced_station_ids:
         await refresh_station_source_if_needed(db, station, requested=True, force=True)
         synced_station_ids.add(station.id)
     await aggregate_range(db, station.id, date_from, today)
-    alert_id = None
+
+    evaluations: list[dict[str, Any]] = []
     current = date_from
     while current <= today:
-        result = await evaluate_alert_for_day(
-            db,
-            station.id,
-            crop.id,
-            current,
-            planting_date=planting_date,
-        )
-        alert_id = result.get("alert_id") or alert_id
+        result = await evaluate_alert_for_day(db, station.id, crop.id, current, planting_date=planting_date)
+        evaluations.append({**result, "evaluation_date": current.isoformat()})
         current += timedelta(days=1)
-    if not alert_id:
+    candidates = [item for item in evaluations if item.get("alert_id")]
+    if not candidates:
         raise ValueError("No fue posible evaluar las últimas 72 horas")
-    recommendation = await run_agent_for_alert(
-        db,
-        UUID(str(alert_id)),
-        period="72h",
-        purpose="DAILY_DIGEST",
-        force=True,
-    )
+    maximum = max(candidates, key=lambda item: (ALERT_ORDER.get(str(item.get("level") or "").upper(), -1), item["evaluation_date"]))
+    level = str(maximum.get("level") or "DATOS_INSUFICIENTES").upper()
+    eligible = ALERT_ORDER.get(level, -1) >= ALERT_ORDER.get(minimum_level, 1)
+    markdown = ""
+    if eligible or include_below_threshold:
+        recommendation = await run_agent_for_alert(
+            db,
+            UUID(str(maximum["alert_id"])),
+            period="72h",
+            purpose="DAILY_DIGEST",
+            force=True,
+        )
+        markdown = (recommendation or {}).get("markdown") or "No se pudo generar el criterio IA."
     return {
         "label": context.get("label") or f"{crop.name} · {station.name}",
         "station": station.name,
         "crop": crop.name,
-        "markdown": (recommendation or {}).get("markdown") or "No se pudo generar el criterio IA.",
+        "level": level,
+        "eligible": eligible,
+        "evaluation_date": maximum["evaluation_date"],
+        "markdown": markdown,
     }
 
 
@@ -249,63 +567,120 @@ async def generate_daily_digest(
     now_local = datetime.now(timezone)
     today_key = now_local.date().isoformat()
     if not force:
-        if int(config.get("send_hour", 6)) != now_local.hour:
-            return {"status": "SKIPPED", "reason": "outside_schedule"}
+        # Run at the first scheduler cycle at or after the configured local hour;
+        # this avoids permanently missing a day when a worker is delayed.
+        if now_local.hour < int(config.get("send_hour", 6)):
+            return {"status": "SKIPPED", "reason": "before_schedule"}
         if config.get("last_delivery_date") == today_key:
             return {"status": "SKIPPED", "reason": "already_sent_today"}
 
     started = datetime.now(UTC)
+    minimum_level = str(config.get("telegram_minimum_level") or "MODERADA").upper()
+    if minimum_level not in {"MODERADA", "GRAVE"}:
+        minimum_level = "MODERADA"
     log = IntegrationLog(
         integration_id=integration.id,
         operation="DAILY_PRODUCER_DIGEST",
         status="RUNNING",
         started_at=started,
-        extra_data={"force": force, "date": today_key, "only_channels": sorted(only_channels or [])},
+        extra_data={
+            "force": force,
+            "date": today_key,
+            "only_channels": sorted(only_channels or []),
+            "minimum_level": minimum_level,
+        },
     )
     db.add(log)
     await db.commit()
     await db.refresh(log)
     try:
-        sections = []
-        failures = []
+        all_sections: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
         synced_station_ids: set[UUID] = set()
         for item in config.get("contexts") or []:
             try:
-                sections.append(
+                all_sections.append(
                     await _context_digest(
                         db,
                         item,
                         synced_station_ids=synced_station_ids,
+                        minimum_level=minimum_level,
+                        include_below_threshold=force,
                     )
                 )
             except Exception as exc:
                 failures.append({"context": item.get("label") or item, "error": str(exc)[:500]})
+
+        sections = [item for item in all_sections if item["eligible"] or force]
+        if not sections and not force:
+            integration.last_run_at = datetime.now(UTC)
+            integration.last_result = "SKIPPED"
+            log.status = "COMPLETED"
+            log.finished_at = datetime.now(UTC)
+            log.duration_ms = int((log.finished_at - started).total_seconds() * 1000)
+            log.records_created = 0
+            log.extra_data = {
+                "reason": "no_moderate_or_severe_alert",
+                "minimum_level": minimum_level,
+                "evaluated_contexts": [
+                    {"label": item["label"], "level": item["level"], "evaluation_date": item["evaluation_date"]}
+                    for item in all_sections
+                ],
+                "failures": failures,
+            }
+            await db.commit()
+            return {
+                "status": "SKIPPED",
+                "reason": "no_moderate_or_severe_alert",
+                "minimum_level": minimum_level,
+                "contexts": len(all_sections),
+                "failures": failures,
+            }
         if not sections:
             raise RuntimeError("Ningún contexto pudo generar el boletín")
+
         header = (
-            f"# 🌦️ FECOCLIMA IA · Boletín de 72 horas\n\n"
+            f"# 🌦️ FECOCLIMA IA · Alerta de 72 horas\n\n"
             f"**Fecha:** {now_local.strftime('%d/%m/%Y')}\n\n"
-            "Este boletín combina estación, reglas publicadas, fenología, pronóstico, Copernicus y fuentes documentales."
         )
         body = [header]
         for section in sections:
-            body.append(f"\n## 🌱 {section['label']}\n\n{section['markdown']}")
+            body.append(
+                f"\n## 🌱 {section['label']} · {section['level']}\n\n{section['markdown']}"
+            )
         if failures:
             body.append("\n## ⚠️ Contextos no procesados\n" + "\n".join(f"- {item['context']}: {item['error']}" for item in failures))
         markdown = "\n".join(body)
         sent_channels: list[str] = []
+        delivery_details: dict[str, Any] = {}
+
         if config.get("email_enabled") and (only_channels is None or "email" in only_channels):
             recipients = list(config.get("recipients") or [])
             if not recipients:
                 raise RuntimeError("No hay destinatarios de correo configurados")
-            await _send_email(recipients, f"FECOCLIMA IA · Análisis de 72 horas · {now_local.strftime('%d/%m/%Y')}", markdown)
+            await _send_email(
+                recipients,
+                f"FECOCLIMA IA · Alerta {minimum_level.lower()} o superior · {now_local.strftime('%d/%m/%Y')}",
+                markdown,
+            )
             sent_channels.append("email")
+            delivery_details["email"] = {"sent": len(recipients)}
+
         if config.get("telegram_enabled") and (only_channels is None or "telegram" in only_channels):
-            token = decrypt_secret(integration.encrypted_secret)
+            token = telegram_bot_token(integration)
             if not token:
                 raise RuntimeError("El token de Telegram no está configurado")
-            await _send_telegram(token, str(config.get("telegram_chat_id")), markdown)
+            await sync_telegram_subscriptions(db, integration)
+            config = {**default_config(), **(integration.non_sensitive_config or {})}
+            telegram_result = await send_telegram_to_subscribers(
+                db,
+                integration,
+                token,
+                markdown,
+            )
             sent_channels.append("telegram")
+            delivery_details["telegram"] = telegram_result
+
         if not sent_channels:
             raise RuntimeError("No hay canales de envío activos")
         if mark_delivered:
@@ -317,9 +692,21 @@ async def generate_daily_digest(
         log.finished_at = datetime.now(UTC)
         log.duration_ms = int((log.finished_at - started).total_seconds() * 1000)
         log.records_created = len(sections)
-        log.extra_data = {"channels": sent_channels, "contexts": len(sections), "failures": failures}
+        log.extra_data = {
+            "channels": sent_channels,
+            "delivery": delivery_details,
+            "contexts": len(sections),
+            "levels": {item["label"]: item["level"] for item in sections},
+            "failures": failures,
+        }
         await db.commit()
-        return {"status": "COMPLETED", "channels": sent_channels, "contexts": len(sections), "failures": failures}
+        return {
+            "status": "COMPLETED",
+            "channels": sent_channels,
+            "delivery": delivery_details,
+            "contexts": len(sections),
+            "failures": failures,
+        }
     except Exception as exc:
         integration.last_run_at = datetime.now(UTC)
         integration.last_result = "FAILED"

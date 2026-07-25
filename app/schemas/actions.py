@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import re
 from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 class DateRangePayload(BaseModel):
@@ -84,6 +85,28 @@ class PublicSatelliteRefreshPayload(BaseModel):
     station_id: UUID
     crop_code: str = Field(min_length=1, max_length=30)
     force: bool = True
+
+
+class PublicSatelliteMapProcessPayload(BaseModel):
+    station_id: UUID
+    crop_code: str = Field(min_length=1, max_length=30)
+    scene_id: str | None = Field(default=None, min_length=1, max_length=500)
+    captured_date: date | None = None
+    history_days: int | None = Field(default=None, ge=7, le=366)
+    force: bool = True
+
+    @model_validator(mode="after")
+    def validate_scene(self):
+        if not self.scene_id and not self.captured_date:
+            raise ValueError("Seleccione una escena o una fecha para procesar")
+        return self
+
+
+class PublicSatelliteMapAgentPayload(BaseModel):
+    station_id: UUID
+    crop_code: str = Field(min_length=1, max_length=30)
+    observation_id: UUID
+    force: bool = False
 
 
 class PhenologyStagePayload(BaseModel):
@@ -210,9 +233,23 @@ class ProducerNotificationSettingsPayload(BaseModel):
     email_enabled: bool = False
     recipients: list[EmailStr] = Field(default_factory=list)
     telegram_enabled: bool = False
-    telegram_chat_id: str | None = Field(default=None, max_length=120)
     telegram_bot_token: str | None = Field(default=None, max_length=300)
+    telegram_minimum_level: Literal["MODERADA", "GRAVE"] = "MODERADA"
     contexts: list[NotificationContextPayload] = Field(default_factory=list)
+
+    @field_validator("telegram_bot_token")
+    @classmethod
+    def validate_telegram_token(cls, value: str | None):
+        if value is None:
+            return None
+        token = value.strip()
+        if not token:
+            return None
+        if not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", token):
+            raise ValueError(
+                "Pegue el token completo entregado por BotFather, incluyendo el ID numérico y los dos puntos"
+            )
+        return token
 
     @model_validator(mode="after")
     def validate_channels(self):
@@ -223,8 +260,6 @@ class ProducerNotificationSettingsPayload(BaseModel):
         self.recipients = sorted({str(item).strip().lower() for item in self.recipients if str(item).strip()})
         if self.email_enabled and not self.recipients:
             raise ValueError("Agregue al menos un destinatario de correo")
-        if self.telegram_enabled and not self.telegram_chat_id:
-            raise ValueError("Ingrese el chat_id de Telegram")
         if self.active and not self.contexts:
             raise ValueError("Agregue al menos una estación, cultivo y fecha de siembra")
         return self

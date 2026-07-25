@@ -12,7 +12,7 @@ from app.schemas.resources import IntegrationPayload
 from app.services.audit import write_audit
 from app.services.serialization import model_dict
 from app.services.forecast import fetch_open_meteo
-from app.services.satellite import station_geometry, test_copernicus_integration
+from app.services.satellite import test_copernicus_integration
 
 router = APIRouter(prefix="/integrations", tags=["Integraciones"])
 
@@ -84,12 +84,7 @@ async def update_integration(integration_id: uuid.UUID, payload: IntegrationPayl
 
 
 @router.post("/{integration_id}/test")
-async def test_integration(
-    integration_id: uuid.UUID,
-    db: DbSession,
-    _: AdminUser,
-    station_id: uuid.UUID | None = None,
-) -> dict:
+async def test_integration(integration_id: uuid.UUID, db: DbSession, _: AdminUser, station_id: uuid.UUID | None = None) -> dict:
     row = await db.get(IntegrationConfig, integration_id)
     if not row or row.deleted_at:
         raise HTTPException(status_code=404, detail="Integración no encontrada")
@@ -99,14 +94,24 @@ async def test_integration(
     test_data: dict = {}
     try:
         if row.provider == "OPEN_METEO":
-            station = await db.scalar(
-                select(Station).where(
-                    Station.active.is_(True),
-                    Station.deleted_at.is_(None),
-                    Station.latitude.is_not(None),
-                    Station.longitude.is_not(None),
-                ).order_by(case((Station.code == "RAUL-PENA", 0), else_=1), Station.updated_at.desc()).limit(1)
-            )
+            if station_id:
+                station = await db.get(Station, station_id)
+                if station and (
+                    station.deleted_at
+                    or not station.active
+                    or station.latitude is None
+                    or station.longitude is None
+                ):
+                    station = None
+            else:
+                station = await db.scalar(
+                    select(Station).where(
+                        Station.active.is_(True),
+                        Station.deleted_at.is_(None),
+                        Station.latitude.is_not(None),
+                        Station.longitude.is_not(None),
+                    ).order_by(case((Station.code == "RAUL-PENA", 0), else_=1), Station.updated_at.desc()).limit(1)
+                )
             if not station:
                 raise ValueError("No existe una estación activa con coordenadas")
             forecast = await fetch_open_meteo(station.latitude, station.longitude, days=2)
@@ -165,7 +170,6 @@ async def test_integration(
     db.add(
         IntegrationLog(
             integration_id=row.id,
-            station_id=(uuid.UUID(str(test_data["station_id"])) if test_data.get("station_id") else station_id),
             operation="TEST_CONNECTION",
             status=status,
             started_at=started,
@@ -184,57 +188,6 @@ async def test_integration(
         "detail": detail,
         "data": test_data,
     }
-
-
-@router.get("/{integration_id}/station-status")
-async def integration_station_status(
-    integration_id: uuid.UUID,
-    db: DbSession,
-    _: AdminUser,
-) -> dict:
-    integration = await db.get(IntegrationConfig, integration_id)
-    if not integration or integration.deleted_at:
-        raise HTTPException(status_code=404, detail="Integración no encontrada")
-    stations = list((await db.scalars(
-        select(Station)
-        .where(Station.active.is_(True), Station.deleted_at.is_(None))
-        .order_by(Station.name)
-    )).all())
-    items = []
-    for station in stations:
-        geometry_status = "READY"
-        geometry_source = None
-        geometry_error = None
-        try:
-            station_geometry(station)
-            geometry_source = "POLYGON" if station.influence_geojson else "POINT_RADIUS"
-        except ValueError as exc:
-            geometry_status = "INCOMPLETE"
-            geometry_error = str(exc)
-        latest_log = await db.scalar(
-            select(IntegrationLog)
-            .where(
-                IntegrationLog.integration_id == integration.id,
-                IntegrationLog.station_id == station.id,
-            )
-            .order_by(IntegrationLog.created_at.desc())
-            .limit(1)
-        )
-        items.append({
-            "station_id": str(station.id),
-            "station": station.name,
-            "code": station.code,
-            "geometry_status": geometry_status,
-            "geometry_source": geometry_source,
-            "geometry_error": geometry_error,
-            "last_result": latest_log.status if latest_log else None,
-            "last_run_at": latest_log.finished_at.isoformat() if latest_log and latest_log.finished_at else None,
-            "last_detail": (
-                ((latest_log.extra_data or {}).get("detail") if latest_log else None)
-                or (latest_log.error_message if latest_log else None)
-            ),
-        })
-    return {"integration_id": str(integration.id), "items": items}
 
 
 @router.get("/{integration_id}/logs")

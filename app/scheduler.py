@@ -12,6 +12,7 @@ from app.core.logging import configure_logging
 from app.db.models import Station
 from app.db.session import AsyncSessionLocal
 from app.services.jobs import enqueue_unique
+from app.services.producer_notifications import sync_telegram_subscriptions
 
 configure_logging()
 logger = structlog.get_logger(__name__)
@@ -50,6 +51,12 @@ async def schedule_station_jobs() -> None:
                     priority=80,
                 )
                 scheduled += int(job is not None)
+            # Satellite processing is geometry-driven. A station with a valid
+            # Polygon/MultiPolygon must be scheduled even when no centroid was
+            # entered, while coordinate-only stations keep the radius fallback.
+            if station.influence_geojson is not None or (
+                station.latitude is not None and station.longitude is not None
+            ):
                 satellite_job = await enqueue_unique(
                     db,
                     "SATELLITE_SYNC",
@@ -89,6 +96,17 @@ async def schedule_daily_digest() -> None:
         )
 
 
+async def poll_telegram_subscriptions() -> None:
+    """Process /start, /status and /stop using outbound Bot API polling."""
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await sync_telegram_subscriptions(db)
+            if result.get("processed"):
+                logger.info("telegram_updates_processed", processed=result["processed"])
+        except Exception as exc:
+            logger.warning("telegram_poll_failed", error=str(exc)[:1000])
+
+
 async def main() -> None:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -107,6 +125,14 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(UTC) + timedelta(seconds=45),
+    )
+    scheduler.add_job(
+        poll_telegram_subscriptions,
+        "interval",
+        minutes=1,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(UTC) + timedelta(seconds=20),
     )
     scheduler.add_job(
         schedule_backup,

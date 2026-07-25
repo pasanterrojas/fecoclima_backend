@@ -6,6 +6,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -464,6 +465,30 @@ class IntegrationLog(Base, TimestampMixin):
     records_updated: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     extra_data: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+
+
+class TelegramSubscriber(Base, TimestampMixin):
+    __tablename__ = "telegram_subscribers"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("integration_configs.id", ondelete="CASCADE"), index=True
+    )
+    chat_id: Mapped[str] = mapped_column(String(80))
+    chat_type: Mapped[str | None] = mapped_column(String(30))
+    title: Mapped[str | None] = mapped_column(String(220))
+    username: Mapped[str | None] = mapped_column(String(120))
+    first_name: Mapped[str | None] = mapped_column(String(120))
+    last_name: Mapped[str | None] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    minimum_level: Mapped[str] = mapped_column(String(30), default="MODERADA")
+    subscribed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_update_id: Mapped[int | None] = mapped_column(BigInteger)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint("integration_id", "chat_id", name="uq_telegram_subscriber_chat"),
+    )
 
 
 class SatelliteObservation(Base, TimestampMixin):

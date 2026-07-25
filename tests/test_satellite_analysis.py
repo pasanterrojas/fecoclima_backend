@@ -13,7 +13,18 @@ def observation(**overrides):
         "ndwi": -0.08,
         "raw_payload": {
             "geometry_mode": "polygon",
-            "statistics": {},
+            "indices": {
+                "ndvi": 0.62,
+                "ndmi": 0.24,
+                "ndwi": -0.08,
+                "evi": 0.51,
+                "savi": 0.48,
+                "ndre": 0.33,
+                "gndvi": 0.57,
+                "nbr": 0.44,
+                "msi": 0.72,
+            },
+            "statistics": {"ndvi": {"sample_count": 100}},
         },
         "previous_comparison": {},
     }

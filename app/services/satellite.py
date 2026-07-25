@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import random
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from app.services.serialization import model_dict
 
 logger = structlog.get_logger(__name__)
 _token_cache: dict[str, dict[str, Any]] = {}
+_catalog_scene_cache: dict[str, dict[str, Any]] = {}
 
 INDEX_NAMES = ("ndvi", "ndmi", "ndwi", "evi", "savi", "ndre", "gndvi", "nbr", "msi")
 
@@ -30,22 +33,92 @@ def _number(value: Any, default: float) -> float:
         return default
 
 
-def _polygon_geometry(value: Any) -> dict[str, Any] | None:
+def _coordinate(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    if isinstance(value[0], bool) or isinstance(value[1], bool):
+        return None
+    try:
+        longitude = float(value[0])
+        latitude = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(longitude) or not math.isfinite(latitude):
+        return None
+    if not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
+        return None
+    return [longitude, latitude]
+
+
+def _normalize_ring(value: Any) -> list[list[float]] | None:
+    if not isinstance(value, list):
+        return None
+    ring = [point for item in value if (point := _coordinate(item)) is not None]
+    if len(ring) < 3:
+        return None
+    if ring[0] != ring[-1]:
+        ring.append(list(ring[0]))
+    if len(ring) < 4:
+        return None
+    # Reject degenerate rings: they are accepted by shallow JSON validation but
+    # fail or return empty products in STAC/Process API calls.
+    area = 0.0
+    for current, following in zip(ring, ring[1:]):
+        area += current[0] * following[1] - following[0] * current[1]
+    if abs(area) < 1e-12:
+        return None
+    return ring
+
+
+def _normalize_polygon(value: Any) -> list[list[list[float]]] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    exterior = _normalize_ring(value[0])
+    if not exterior:
+        return None
+    polygon = [exterior]
+    for candidate in value[1:]:
+        hole = _normalize_ring(candidate)
+        if hole:
+            polygon.append(hole)
+    return polygon
+
+
+def normalize_polygon_geometry(value: Any) -> dict[str, Any]:
+    """Validate and canonicalize a GeoJSON Polygon/MultiPolygon.
+
+    Feature wrappers are accepted. Rings are closed automatically, invalid
+    points/ranges and zero-area polygons are rejected, and only geometry is
+    returned so the same canonical object is used by Catalog, Process and
+    Statistical APIs.
+    """
     if not isinstance(value, dict):
-        return None
+        raise ValueError("El GeoJSON debe ser un objeto JSON")
     geometry = value.get("geometry") if value.get("type") == "Feature" else value
-    if not isinstance(geometry, dict) or geometry.get("type") not in {"Polygon", "MultiPolygon"}:
-        return None
+    if not isinstance(geometry, dict):
+        raise ValueError("El GeoJSON no contiene una geometría")
+    geometry_type = geometry.get("type")
     coordinates = geometry.get("coordinates")
-    if not isinstance(coordinates, list) or not coordinates:
+    if geometry_type == "Polygon":
+        polygon = _normalize_polygon(coordinates)
+        if not polygon:
+            raise ValueError("El Polygon no contiene un anillo exterior válido y con área")
+        return {"type": "Polygon", "coordinates": polygon}
+    if geometry_type == "MultiPolygon":
+        if not isinstance(coordinates, list) or not coordinates:
+            raise ValueError("El MultiPolygon no contiene polígonos")
+        polygons = [polygon for candidate in coordinates if (polygon := _normalize_polygon(candidate))]
+        if not polygons:
+            raise ValueError("El MultiPolygon no contiene polígonos válidos y con área")
+        return {"type": "MultiPolygon", "coordinates": polygons}
+    raise ValueError("La geometría debe ser Polygon o MultiPolygon")
+
+
+def _polygon_geometry(value: Any) -> dict[str, Any] | None:
+    try:
+        return normalize_polygon_geometry(value)
+    except ValueError:
         return None
-    if geometry["type"] == "Polygon":
-        ring = coordinates[0] if coordinates else None
-    else:
-        ring = coordinates[0][0] if coordinates and isinstance(coordinates[0], list) and coordinates[0] else None
-    if not isinstance(ring, list) or len(ring) < 4:
-        return None
-    return geometry
 
 
 def _buffer_geometry(latitude: float, longitude: float, radius_m: int | float | None) -> dict[str, Any]:
@@ -237,6 +310,39 @@ def _integration_config(integration: IntegrationConfig | None) -> dict[str, Any]
     return dict((integration.non_sensitive_config or {}) if integration else {})
 
 
+def _bounded_number(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def satellite_runtime_config(integration: IntegrationConfig | None) -> dict[str, Any]:
+    """Return validated Copernicus behaviour configured from Admin → Integraciones."""
+    config = _integration_config(integration)
+    return {
+        "max_cloud_percentage": _bounded_number(
+            config.get("max_cloud_percentage"), settings.satellite_max_cloud_percentage, 0, 100
+        ),
+        "lookback_days": int(_bounded_number(
+            config.get("lookback_days"), settings.satellite_lookback_days, 1, 366
+        )),
+        "history_days": int(_bounded_number(config.get("history_days"), 60, 7, 366)),
+        "history_limit": int(_bounded_number(config.get("history_limit"), 18, 3, 60)),
+        "refresh_hours": int(_bounded_number(
+            config.get("refresh_hours"), settings.satellite_refresh_hours, 1, 168
+        )),
+        "catalog_limit": int(_bounded_number(config.get("catalog_limit"), 30, 5, 100)),
+        "minimum_valid_pixels": int(_bounded_number(config.get("minimum_valid_pixels"), 25, 1, 100000)),
+        "default_map_opacity": _bounded_number(config.get("default_map_opacity"), 0.78, 0.1, 1),
+    }
+
+
+async def get_satellite_runtime_config(db: AsyncSession) -> dict[str, Any]:
+    return satellite_runtime_config(await _integration(db))
+
+
 def _catalog_url(integration: IntegrationConfig | None) -> str:
     config = _integration_config(integration)
     return str(config.get("stac_search_url") or (integration.base_url if integration else None) or settings.copernicus_stac_search_url)
@@ -247,46 +353,208 @@ def _collection(integration: IntegrationConfig | None) -> str:
     return str(config.get("collection") or "sentinel-2-l2a")
 
 
+class CatalogTemporaryError(RuntimeError):
+    """Transient catalogue failure after retrying official CDSE endpoints."""
+
+
+def _geometry_bbox(geometry: dict[str, Any]) -> list[float]:
+    points: list[tuple[float, float]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
+                points.append((float(value[0]), float(value[1])))
+                return
+            for item in value:
+                collect(item)
+
+    collect(geometry.get("coordinates"))
+    if not points:
+        raise ValueError("La geozona no contiene coordenadas utilizables para consultar el catálogo")
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _catalog_endpoint_candidates(integration: IntegrationConfig | None) -> list[tuple[str, bool]]:
+    """Prefer the authenticated Catalog API and retain public STAC as fallback."""
+    config = _integration_config(integration)
+    primary = _catalog_url(integration).rstrip("/")
+    public_stac = str(config.get("public_stac_search_url") or "https://stac.dataspace.copernicus.eu/v1/search").rstrip("/")
+    sentinel_hub = str(
+        config.get("sentinelhub_catalog_url")
+        or "https://sh.dataspace.copernicus.eu/catalog/v1/search"
+    ).rstrip("/")
+    client_id, client_secret = _oauth_credentials(integration)
+    ordered = (sentinel_hub, primary, public_stac) if client_id and client_secret else (primary, public_stac, sentinel_hub)
+    values: list[tuple[str, bool]] = []
+    for url in ordered:
+        if not url or any(existing[0] == url for existing in values):
+            continue
+        values.append((url, "sh.dataspace.copernicus.eu" in url))
+    return values
+
+
+def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(0.2, min(float(retry_after), 8.0))
+            except (TypeError, ValueError):
+                pass
+    return min(0.5 * (2**attempt) + random.uniform(0.05, 0.25), 4.0)
+
+
 async def _search_copernicus_catalog_for_geometry(
     integration: IntegrationConfig | None,
     geometry: dict[str, Any],
     date_from: date,
     date_to: date,
     max_cloud_percentage: float = 40,
+    max_items: int = 20,
 ) -> dict[str, Any]:
-    payload = {
-        "collections": [_collection(integration)],
+    """Search CDSE robustly, with retries and an authenticated official fallback.
+
+    When OAuth is available, the authenticated Sentinel Hub Catalog endpoint is
+    tried first. Public STAC remains a retry/fallback path; transient provider
+    errors are never reported as invalid station geometry.
+    """
+    collection = _collection(integration)
+    limit = max(1, min(int(max_items), 100))
+    datetime_range = f"{date_from.isoformat()}T00:00:00Z/{date_to.isoformat()}T23:59:59Z"
+    bbox = _geometry_bbox(geometry)
+    full_payload = {
+        "collections": [collection],
         "intersects": geometry,
-        "datetime": f"{date_from.isoformat()}T00:00:00Z/{date_to.isoformat()}T23:59:59Z",
-        "limit": 20,
+        "datetime": datetime_range,
+        "limit": limit,
         "query": {"eo:cloud_cover": {"lte": max_cloud_percentage}},
         "sortby": [{"field": "datetime", "direction": "desc"}],
     }
-    async with httpx.AsyncClient(timeout=settings.external_http_timeout_seconds, follow_redirects=True) as client:
-        attempts = [payload]
-        without_query = dict(payload)
-        without_query.pop("query", None)
-        attempts.append(without_query)
-        basic = dict(without_query)
-        basic.pop("sortby", None)
-        attempts.append(basic)
-        response = None
-        for candidate in attempts:
-            response = await client.post(_catalog_url(integration), json=candidate)
-            if response.status_code not in {400, 422}:
+    simple_intersects = {
+        "collections": [collection],
+        "intersects": geometry,
+        "datetime": datetime_range,
+        "limit": limit,
+    }
+    simple_bbox = {
+        "collections": [collection],
+        "bbox": bbox,
+        "datetime": datetime_range,
+        "limit": limit,
+    }
+    get_params = {
+        "collections": collection,
+        "bbox": ",".join(str(value) for value in bbox),
+        "datetime": datetime_range,
+        "limit": str(limit),
+    }
+
+    timeout = httpx.Timeout(connect=15.0, read=max(45.0, float(settings.external_http_timeout_seconds)), write=30.0, pool=15.0)
+    retryable_statuses = {408, 425, 429, 500, 502, 503, 504}
+    errors: list[str] = []
+    parsed_result: dict[str, Any] | None = None
+    used_url: str | None = None
+    used_mode: str | None = None
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=2),
+        headers={"Accept": "application/geo+json, application/json", "User-Agent": "FecoClimaIA/1.0"},
+    ) as client:
+        for endpoint, requires_oauth in _catalog_endpoint_candidates(integration):
+            headers: dict[str, str] = {}
+            if requires_oauth:
+                try:
+                    headers["Authorization"] = f"Bearer {await _access_token(integration)}"
+                except Exception as exc:
+                    errors.append(f"{endpoint}: OAuth no disponible ({str(exc)[:240]})")
+                    continue
+
+            request_variants: list[tuple[str, str, dict[str, Any]]] = []
+            if not requires_oauth:
+                request_variants.extend([
+                    ("POST", "intersects_filtered", {"json": full_payload}),
+                    ("POST", "intersects_simple", {"json": simple_intersects}),
+                ])
+            request_variants.extend([
+                ("POST", "bbox_post", {"json": simple_bbox}),
+                ("GET", "bbox_get", {"params": get_params}),
+            ])
+
+            for method, mode, kwargs in request_variants:
+                last_response: httpx.Response | None = None
+                for attempt in range(3):
+                    try:
+                        response = await client.request(method, endpoint, headers=headers, **kwargs)
+                        last_response = response
+                    except httpx.RequestError as exc:
+                        errors.append(f"{endpoint} {mode} intento {attempt + 1}: {type(exc).__name__}: {str(exc)[:240]}")
+                        if attempt < 2:
+                            await asyncio.sleep(_retry_delay(None, attempt))
+                            continue
+                        break
+
+                    if response.status_code < 400:
+                        try:
+                            candidate = response.json()
+                        except (ValueError, json.JSONDecodeError) as exc:
+                            errors.append(f"{endpoint} {mode}: respuesta no JSON ({str(exc)[:180]})")
+                            candidate = None
+                        if isinstance(candidate, dict) and isinstance(candidate.get("features", []), list):
+                            parsed_result = candidate
+                            used_url = endpoint
+                            used_mode = mode
+                            break
+                        errors.append(f"{endpoint} {mode}: respuesta sin colección 'features'")
+                        break
+
+                    body = response.text[:500].replace("\n", " ")
+                    errors.append(f"{endpoint} {mode} HTTP {response.status_code}: {body}")
+                    if response.status_code in retryable_statuses and attempt < 2:
+                        logger.warning(
+                            "copernicus_catalog_retry",
+                            endpoint=endpoint,
+                            mode=mode,
+                            status=response.status_code,
+                            attempt=attempt + 1,
+                        )
+                        await asyncio.sleep(_retry_delay(response, attempt))
+                        continue
+                    break
+
+                if parsed_result is not None:
+                    break
+                if last_response is not None and last_response.status_code not in retryable_statuses | {400, 404, 405, 422}:
+                    # Authentication/permission and other terminal errors should
+                    # still allow the next official endpoint, but not repeat this shape.
+                    continue
+            if parsed_result is not None:
                 break
-        assert response is not None
-        if response.status_code >= 400:
-            raise RuntimeError(f"STAC/catalog HTTP {response.status_code}: {response.text[:1000]}")
-        result = response.json()
-    features = result.get("features", []) if isinstance(result, dict) else []
-    features = [item for item in features if _feature_cloud(item) is None or _feature_cloud(item) <= max_cloud_percentage]
+
+    if parsed_result is None:
+        detail = " | ".join(errors[-8:]) or "sin respuesta del catálogo"
+        raise CatalogTemporaryError(
+            "Copernicus no pudo responder después de varios reintentos y del catálogo alternativo oficial. "
+            f"Detalle: {detail}"
+        )
+
+    features = parsed_result.get("features", [])
+    features = [
+        item
+        for item in features
+        if isinstance(item, dict) and (_feature_cloud(item) is None or _feature_cloud(item) <= max_cloud_percentage)
+    ]
     features.sort(key=_feature_datetime, reverse=True)
     return {
         "provider": "COPERNICUS_DATA_SPACE",
         "features": features,
         "count": len(features),
-        "catalog_url": _catalog_url(integration),
+        "catalog_url": used_url or _catalog_url(integration),
+        "catalog_mode": used_mode,
+        "fallback_used": bool(used_url and used_url.rstrip("/") != _catalog_url(integration).rstrip("/")),
     }
 
 
@@ -308,6 +576,7 @@ async def search_copernicus_catalog(
         date_from,
         date_to,
         max_cloud_percentage,
+        20,
     )
     return {
         **result,
@@ -413,6 +682,57 @@ function setup() { return { input: ["B02","B03","B04","dataMask"], output: { ban
 function evaluatePixel(s) { return [2.5*s.B04*s.dataMask, 2.5*s.B03*s.dataMask, 2.5*s.B02*s.dataMask]; }
 """
 
+INDEX_VISUAL_CONFIG: dict[str, dict[str, Any]] = {
+    "ndvi": {"expression": "ratio(s.B08,s.B04)", "min": -0.2, "max": 0.9, "palette": [[0.42,0.22,0.08],[0.92,0.78,0.25],[0.35,0.68,0.25],[0.04,0.34,0.12]]},
+    "ndmi": {"expression": "ratio(s.B08,s.B11)", "min": -0.5, "max": 0.7, "palette": [[0.70,0.28,0.12],[0.93,0.79,0.35],[0.20,0.66,0.58],[0.04,0.25,0.55]]},
+    "ndwi": {"expression": "ratio(s.B03,s.B08)", "min": -0.6, "max": 0.6, "palette": [[0.55,0.33,0.13],[0.78,0.74,0.52],[0.28,0.74,0.78],[0.03,0.22,0.63]]},
+    "evi": {"expression": "2.5*divide(s.B08-s.B04,s.B08+6*s.B04-7.5*s.B02+1)", "min": -0.2, "max": 0.9, "palette": [[0.45,0.20,0.08],[0.94,0.76,0.22],[0.29,0.70,0.25],[0.02,0.30,0.09]]},
+    "savi": {"expression": "1.5*divide(s.B08-s.B04,s.B08+s.B04+0.5)", "min": -0.2, "max": 0.9, "palette": [[0.48,0.24,0.10],[0.90,0.73,0.26],[0.42,0.72,0.24],[0.04,0.34,0.11]]},
+    "ndre": {"expression": "ratio(s.B8A,s.B05)", "min": -0.2, "max": 0.7, "palette": [[0.48,0.18,0.16],[0.91,0.67,0.24],[0.45,0.72,0.29],[0.04,0.36,0.15]]},
+    "gndvi": {"expression": "ratio(s.B08,s.B03)", "min": -0.2, "max": 0.9, "palette": [[0.49,0.22,0.08],[0.91,0.78,0.27],[0.28,0.68,0.30],[0.02,0.31,0.13]]},
+    "nbr": {"expression": "ratio(s.B08,s.B12)", "min": -0.6, "max": 0.9, "palette": [[0.55,0.07,0.06],[0.94,0.56,0.18],[0.69,0.78,0.32],[0.04,0.38,0.14]]},
+    "msi": {"expression": "divide(s.B11,s.B08)", "min": 0.2, "max": 2.5, "palette": [[0.04,0.34,0.50],[0.30,0.70,0.53],[0.94,0.75,0.24],[0.66,0.08,0.06]]},
+}
+
+
+def _index_visual_evalscript(index_name: str) -> str:
+    config = INDEX_VISUAL_CONFIG.get(index_name)
+    if not config:
+        raise ValueError(f"Índice visual no soportado: {index_name}")
+    palette = json.dumps(config["palette"], separators=(",", ":"))
+    return f"""//VERSION=3
+function setup() {{
+  return {{ input: [{{bands:["B02","B03","B04","B05","B08","B8A","B11","B12","SCL","dataMask"]}}], output: {{bands:4, sampleType:"AUTO"}} }};
+}}
+function ratio(a,b) {{ return Math.abs(a+b) < 0.000001 ? 0 : (a-b)/(a+b); }}
+function divide(a,b) {{ return Math.abs(b) < 0.000001 ? 0 : a/b; }}
+function mix(a,b,t) {{ return a + (b-a)*t; }}
+function palette(value) {{
+  const minValue = {float(config['min'])};
+  const maxValue = {float(config['max'])};
+  const colors = {palette};
+  const t = Math.max(0, Math.min(1, (value-minValue)/(maxValue-minValue)));
+  const scaled = t*(colors.length-1);
+  const left = Math.min(colors.length-2, Math.floor(scaled));
+  const local = scaled-left;
+  return [mix(colors[left][0],colors[left+1][0],local),mix(colors[left][1],colors[left+1][1],local),mix(colors[left][2],colors[left+1][2],local)];
+}}
+function evaluatePixel(s) {{
+  const invalid = s.dataMask !== 1 || [0,1,3,8,9,10,11].includes(s.SCL);
+  if (invalid) return [0,0,0,0];
+  const value = {config['expression']};
+  const color = palette(value);
+  return [color[0],color[1],color[2],1];
+}}
+"""
+
+
+def _scene_time_range(captured_at: datetime) -> tuple[datetime, datetime]:
+    """Use one narrow acquisition window for RGB, every index and statistics."""
+    value = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=UTC)
+    return value - timedelta(minutes=5), value + timedelta(minutes=45)
+
+
 INDEX_EVALSCRIPT = """//VERSION=3
 function setup() {
   return {
@@ -434,8 +754,8 @@ function setup() {
 function ratio(a,b) { return Math.abs(a+b) < 0.000001 ? 0 : (a-b)/(a+b); }
 function divide(a,b) { return Math.abs(b) < 0.000001 ? 0 : a/b; }
 function evaluatePixel(s) {
-  const cloudy = [3,8,9,10,11].includes(s.SCL);
-  const valid = s.dataMask === 1 && !cloudy ? 1 : 0;
+  const invalid = [0,1,3,8,9,10,11].includes(s.SCL);
+  const valid = s.dataMask === 1 && !invalid ? 1 : 0;
   return {
     ndvi:[ratio(s.B08,s.B04)],
     ndmi:[ratio(s.B08,s.B11)],
@@ -457,34 +777,99 @@ def _bounds(geometry: dict[str, Any]) -> dict[str, Any]:
     return {"geometry": geometry, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}}
 
 
-async def _process_image(geometry: dict[str, Any], time_from: datetime, time_to: datetime, max_cloud: float, integration: IntegrationConfig | None) -> bytes:
-    token = await _access_token(integration)
-    payload = {
+def _process_payload(
+    geometry: dict[str, Any],
+    time_from: datetime,
+    time_to: datetime,
+    max_cloud: float,
+    *,
+    evalscript: str,
+    media_type: str,
+) -> dict[str, Any]:
+    return {
         "input": {
             "bounds": _bounds(geometry),
             "data": [{
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": time_from.isoformat().replace("+00:00", "Z"), "to": time_to.isoformat().replace("+00:00", "Z")},
-                    "mosaickingOrder": "leastCC",
+                    "mosaickingOrder": "mostRecent",
                     "maxCloudCoverage": max_cloud,
                 },
             }],
         },
-        "output": {"width": 640, "height": 640, "responses": [{"identifier": "default", "format": {"type": "image/jpeg"}}]},
-        "evalscript": TRUE_COLOR_EVALSCRIPT,
+        "output": {"width": 640, "height": 640, "responses": [{"identifier": "default", "format": {"type": media_type}}]},
+        "evalscript": evalscript,
     }
+
+
+async def _process_raster(
+    geometry: dict[str, Any],
+    time_from: datetime,
+    time_to: datetime,
+    max_cloud: float,
+    integration: IntegrationConfig | None,
+    *,
+    evalscript: str,
+    media_type: str,
+    token: str | None = None,
+) -> bytes:
+    access_token = token or await _access_token(integration)
+    payload = _process_payload(
+        geometry, time_from, time_to, max_cloud, evalscript=evalscript, media_type=media_type
+    )
     async with httpx.AsyncClient(timeout=max(90, settings.external_http_timeout_seconds)) as client:
         response = await client.post(
             _endpoint(integration, "process_url", settings.copernicus_process_url),
-            headers={"Authorization": f"Bearer {token}", "Accept": "image/jpeg"},
+            headers={"Authorization": f"Bearer {access_token}", "Accept": media_type},
             json=payload,
         )
         if response.status_code >= 400:
             raise RuntimeError(f"Process API HTTP {response.status_code}: {response.text[:1000]}")
         if not response.content:
             raise RuntimeError("Process API respondió sin contenido de imagen")
+        if media_type == "image/png" and not response.content.startswith(b"\x89PNG"):
+            raise RuntimeError("Process API no devolvió un PNG válido para el índice")
+        if media_type == "image/jpeg" and not response.content.startswith(b"\xff\xd8"):
+            raise RuntimeError("Process API no devolvió un JPEG válido")
         return response.content
+
+
+async def _process_image(geometry: dict[str, Any], time_from: datetime, time_to: datetime, max_cloud: float, integration: IntegrationConfig | None) -> bytes:
+    return await _process_raster(
+        geometry, time_from, time_to, max_cloud, integration, evalscript=TRUE_COLOR_EVALSCRIPT, media_type="image/jpeg"
+    )
+
+
+async def _process_index_images(
+    geometry: dict[str, Any],
+    time_from: datetime,
+    time_to: datetime,
+    max_cloud: float,
+    integration: IntegrationConfig | None,
+    *,
+    only: set[str] | None = None,
+) -> tuple[dict[str, bytes], dict[str, str]]:
+    """Render all index maps from the same scene window, with bounded concurrency."""
+    token = await _access_token(integration)
+    semaphore = asyncio.Semaphore(3)
+    names = [name for name in INDEX_NAMES if only is None or name in only]
+
+    async def render(name: str) -> tuple[str, bytes | None, str | None]:
+        async with semaphore:
+            try:
+                content = await _process_raster(
+                    geometry, time_from, time_to, max_cloud, integration,
+                    evalscript=_index_visual_evalscript(name), media_type="image/png", token=token,
+                )
+                return name, content, None
+            except Exception as exc:
+                return name, None, str(exc)[:1000]
+
+    rendered = await asyncio.gather(*(render(name) for name in names))
+    images = {name: content for name, content, error in rendered if content is not None}
+    errors = {name: error for name, content, error in rendered if error}
+    return images, errors
 
 
 def _stat_value(stats: dict[str, Any], key: str) -> float | int | None:
@@ -548,7 +933,7 @@ async def _index_statistics(
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": time_from.isoformat().replace("+00:00", "Z"), "to": time_to.isoformat().replace("+00:00", "Z")},
-                    "mosaickingOrder": "leastCC",
+                    "mosaickingOrder": "mostRecent",
                     "maxCloudCoverage": max_cloud,
                 },
             }],
@@ -597,6 +982,7 @@ def build_satellite_analysis(
     ndwi_water = _number(config.get("ndwi_water_threshold"), 0.1)
     ndvi_decline = _number(config.get("ndvi_decline_delta"), -0.08)
     ndmi_decline = _number(config.get("ndmi_decline_delta"), -0.05)
+    minimum_valid_pixels = max(1, int(_number(config.get("minimum_valid_pixels"), 25)))
 
     age_days = max(0.0, (now - observation.captured_at).total_seconds() / 86400)
     cloud = observation.cloud_percentage
@@ -619,7 +1005,14 @@ def build_satellite_analysis(
     geometry_mode = raw.get("geometry_mode") or ("polygon" if plot.geojson else "point_buffer_approximation")
     geometry_score = 100.0 if geometry_mode == "polygon" else 65.0
     index_score = min(100.0, index_count / max(3, len(INDEX_NAMES)) * 100.0)
-    quality_score = round(freshness_score * 0.35 + cloud_score * 0.25 + geometry_score * 0.2 + index_score * 0.2)
+    valid_pixel_counts = [
+        int(value.get("sample_count") or 0)
+        for value in statistics.values()
+        if isinstance(value, dict) and value.get("sample_count") is not None
+    ]
+    valid_pixels = max(valid_pixel_counts) if valid_pixel_counts else 0
+    pixel_score = 100.0 if valid_pixels >= minimum_valid_pixels else (valid_pixels / minimum_valid_pixels * 100.0 if valid_pixels else 35.0)
+    quality_score = round(freshness_score * 0.30 + cloud_score * 0.22 + geometry_score * 0.18 + index_score * 0.18 + pixel_score * 0.12)
     reliability = "alta" if quality_score >= 80 else "media" if quality_score >= 55 else "limitada"
 
     signals: list[dict[str, Any]] = []
@@ -708,6 +1101,10 @@ def build_satellite_analysis(
         limitations.append("La escena es antigua para describir el estado actual del cultivo.")
     if geometry_mode != "polygon":
         limitations.append("La geozona es una aproximación circular; puede mezclar caminos, bosque, viviendas u otros cultivos.")
+    if valid_pixels and valid_pixels < minimum_valid_pixels:
+        limitations.append(
+            f"Solo se obtuvieron {valid_pixels} píxeles válidos; la configuración recomienda al menos {minimum_valid_pixels}."
+        )
     if index_count < 2:
         limitations.append("Faltan índices procesados; el agente debe usar Copernicus solo como referencia visual o de catálogo.")
 
@@ -741,6 +1138,8 @@ def build_satellite_analysis(
             "ndmi_decline_delta": ndmi_decline,
             "max_age_days": max_age_days,
             "max_reliable_cloud_percentage": reliable_cloud,
+            "minimum_valid_pixels": minimum_valid_pixels,
+            "valid_pixels": valid_pixels,
         },
         "agent_policy": {
             "use_as": "complementary_evidence",
@@ -787,7 +1186,7 @@ async def satellite_observation_payload(
         observation,
         plot,
         previous=previous,
-        config=_integration_config(integration),
+        config={**_integration_config(integration), **satellite_runtime_config(integration)},
     )
     return {
         **model_dict(observation, exclude={"raw_payload"}),
@@ -799,6 +1198,22 @@ async def satellite_observation_payload(
         "scene_id": raw.get("scene_id"),
         "geometry_mode": raw.get("geometry_mode") or analysis["geometry_mode"],
         "processing_error": raw.get("processing_error"),
+        "image_available": bool(local_satellite_image_path(observation)),
+        # Always expose the clipped Process API image when it exists. STAC
+        # thumbnails are useful as fallback, but they are not guaranteed to use
+        # the exact polygon or rendering window of the calculated indices.
+        "source_url": (
+            f"/api/v1/public/satellite/{observation.id}/image.jpg"
+            if local_satellite_image_path(observation)
+            else observation.source_url
+        ),
+        "index_images": {
+            name: (f"/api/v1/public/satellite/{observation.id}/indices/{name}.png" if local_satellite_index_image_path(observation, name) else None)
+            for name in INDEX_NAMES
+        },
+        "visual_layers_available": sum(
+            1 for name in INDEX_NAMES if local_satellite_index_image_path(observation, name)
+        ),
         "indices": raw.get("indices") or {
             "ndvi": observation.ndvi,
             "ndmi": observation.ndmi,
@@ -828,24 +1243,53 @@ def local_satellite_image_path(observation: SatelliteObservation) -> Path | None
     return path
 
 
+def local_satellite_index_image_path(observation: SatelliteObservation, index_name: str) -> Path | None:
+    """Return a validated local PNG path for one supported spectral index."""
+    if index_name not in INDEX_NAMES:
+        return None
+    raw = observation.raw_payload or {}
+    value = (raw.get("local_index_image_paths") or {}).get(index_name)
+    if not value:
+        return None
+    path = Path(str(value)).resolve()
+    root = (settings.storage_path / "satellite").resolve()
+    if root not in path.parents or path.suffix.lower() != ".png" or not path.is_file():
+        return None
+    return path
+
+
+def _local_index_paths(observation: SatelliteObservation | None) -> dict[str, str]:
+    if not observation:
+        return {}
+    return {
+        name: str(path)
+        for name in INDEX_NAMES
+        if (path := local_satellite_index_image_path(observation, name)) is not None
+    }
+
+
 async def sync_satellite_for_station(
     db: AsyncSession,
     station_id: UUID | str,
     *,
     crop_id: UUID | None = None,
     force: bool = False,
+    target_date: date | None = None,
+    scene_id: str | None = None,
 ) -> dict[str, Any]:
     station = await db.get(Station, station_id)
     if not station or station.deleted_at:
         raise ValueError("Estación no encontrada")
     plot = await ensure_station_plot(db, station, crop_id)
+    integration = await _integration(db)
+    runtime = satellite_runtime_config(integration)
     latest = await db.scalar(
         select(SatelliteObservation)
         .where(SatelliteObservation.plot_id == plot.id)
         .order_by(SatelliteObservation.captured_at.desc())
         .limit(1)
     )
-    if latest and not force and latest.created_at >= datetime.now(UTC) - timedelta(hours=settings.satellite_refresh_hours):
+    if latest and not force and target_date is None and not scene_id and latest.created_at >= datetime.now(UTC) - timedelta(hours=runtime["refresh_hours"]):
         latest_raw = latest.raw_payload or {}
         latest_indices = latest_raw.get("indices") or {}
         latest_has_indices = any(value is not None for value in latest_indices.values()) or any(
@@ -854,7 +1298,8 @@ async def sync_satellite_for_station(
         # Las filas generadas por versiones anteriores podían marcarse como
         # PROCESSED solo por tener imagen. Si faltan índices, no se devuelve el
         # caché: se intenta completar Statistical API en la misma escena.
-        if latest_has_indices:
+        latest_visual_layers = _local_index_paths(latest)
+        if latest_has_indices and local_satellite_image_path(latest) and len(latest_visual_layers) == len(INDEX_NAMES):
             return {
                 "status": str(latest_raw.get("processing_status") or "CURRENT"),
                 "observation_id": str(latest.id),
@@ -866,20 +1311,38 @@ async def sync_satellite_for_station(
                 "indices": latest_indices,
                 "processing_error": latest_raw.get("processing_error"),
                 "image_available": bool(local_satellite_image_path(latest)),
+                "index_images": {name: f"/api/v1/public/satellite/{latest.id}/indices/{name}.png" for name in latest_visual_layers},
+                "visual_layers_available": len(latest_visual_layers),
                 "processing_credentials_configured": await copernicus_credentials_configured(db),
                 "plot_id": str(plot.id),
             }
-    date_to = datetime.now(UTC).date()
-    catalog = await search_copernicus_catalog(
-        db,
-        plot.id,
-        date_to - timedelta(days=settings.satellite_lookback_days),
+    date_to = target_date or datetime.now(UTC).date()
+    date_from = target_date or (date_to - timedelta(days=runtime["lookback_days"]))
+    geometry = plot_geometry(plot)
+    catalog_result = await _search_copernicus_catalog_for_geometry(
+        integration,
+        geometry,
+        date_from,
         date_to,
-        settings.satellite_max_cloud_percentage,
+        runtime["max_cloud_percentage"],
+        runtime["catalog_limit"],
     )
+    catalog = {
+        **catalog_result,
+        "plot_id": str(plot.id),
+        "geometry_mode": "polygon" if _polygon_geometry(plot.geojson) else "point_buffer_approximation",
+    }
     if not catalog["features"]:
-        return {"status": "NO_SCENE", "plot_id": str(plot.id), "count": 0}
-    feature = catalog["features"][0]
+        return {
+            "status": "NO_SCENE",
+            "plot_id": str(plot.id),
+            "count": 0,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+        }
+    feature = next((item for item in catalog["features"] if str(item.get("id")) == str(scene_id)), None) if scene_id else catalog["features"][0]
+    if scene_id and feature is None:
+        raise ValueError("La escena seleccionada ya no está disponible en el catálogo para la geozona y fecha indicadas")
     captured_at = _feature_datetime(feature)
     existing = await db.scalar(
         select(SatelliteObservation).where(
@@ -894,7 +1357,14 @@ async def sync_satellite_for_station(
         existing and any(value is not None for value in (existing.ndvi, existing.ndmi, existing.ndwi))
     )
     existing_has_image = bool(existing and local_satellite_image_path(existing))
-    existing_complete = existing_status == "PROCESSED" and existing_has_indices and existing_has_image
+    existing_index_paths = _local_index_paths(existing)
+    existing_has_visual_layers = len(existing_index_paths) == len(INDEX_NAMES)
+    existing_complete = (
+        existing_status == "PROCESSED"
+        and existing_has_indices
+        and existing_has_image
+        and existing_has_visual_layers
+    )
     integration = await _integration(db)
     client_id, client_secret = _oauth_credentials(integration)
     credentials_ready = bool(client_id and client_secret)
@@ -912,6 +1382,8 @@ async def sync_satellite_for_station(
             "indices": existing_indices,
             "processing_error": existing_raw.get("processing_error"),
             "image_available": existing_has_image,
+            "index_images": {name: f"/api/v1/public/satellite/{existing.id}/indices/{name}.png" for name in existing_index_paths},
+            "visual_layers_available": len(existing_index_paths),
             "processing_credentials_configured": credentials_ready,
             "plot_id": str(plot.id),
         }
@@ -926,7 +1398,6 @@ async def sync_satellite_for_station(
         .limit(1)
     )
 
-    geometry = plot_geometry(plot)
     preview_url = _feature_preview(feature)
     ndvi = existing.ndvi if existing else None
     ndmi = existing.ndmi if existing else None
@@ -934,15 +1405,17 @@ async def sync_satellite_for_station(
     statistics: dict[str, Any] = dict(existing_raw.get("statistics") or {})
     indices: dict[str, Any] = dict(existing_raw.get("indices") or {})
     processing_status = "CATALOG_ONLY"
-    local_image_path: str | None = existing_raw.get("local_image_path")
+    existing_local_image = local_satellite_image_path(existing) if existing else None
+    local_image_path: str | None = str(existing_local_image) if existing_local_image else None
+    local_index_image_paths: dict[str, str] = _local_index_paths(existing)
     processing_error: str | None = None
     observation_id = existing.id if existing else uuid4()
     if credentials_ready:
-        start = captured_at - timedelta(hours=12)
-        end = captured_at + timedelta(hours=36)
+        start, end = _scene_time_range(captured_at)
         phase_errors: list[str] = []
         image_ready = bool(local_image_path and Path(str(local_image_path)).is_file())
         statistics_ready = any(value is not None for value in indices.values())
+        visual_layers_ready = len(local_index_image_paths) == len(INDEX_NAMES)
 
         source_url = existing.source_url if existing and existing.source_url else (preview_url[:1000] if preview_url else None)
         if not image_ready:
@@ -951,7 +1424,7 @@ async def sync_satellite_for_station(
                     geometry,
                     start,
                     end,
-                    settings.satellite_max_cloud_percentage,
+                    runtime["max_cloud_percentage"],
                     integration,
                 )
                 local = settings.storage_path / "satellite" / f"{observation_id}.jpg"
@@ -971,7 +1444,7 @@ async def sync_satellite_for_station(
                     geometry,
                     start,
                     end,
-                    settings.satellite_max_cloud_percentage,
+                    runtime["max_cloud_percentage"],
                     integration,
                 )
                 new_indices = stats["indices"]
@@ -982,16 +1455,35 @@ async def sync_satellite_for_station(
                     statistics = stats["statistics"]
                     statistics_ready = True
                 else:
-                    phase_errors.append("Statistical API no devolvió píxeles válidos para los índices solicitados")
+                    phase_errors.append("Estadísticas: no se encontraron píxeles válidos")
             except Exception as exc:
                 message = str(exc)[:1000]
                 logger.warning("satellite_statistics_failed", error=message)
-                phase_errors.append(message)
+                phase_errors.append(f"Estadísticas: {message}")
+
+        if not visual_layers_ready:
+            missing = set(INDEX_NAMES) - set(local_index_image_paths)
+            images, visual_errors = await _process_index_images(
+                geometry, start, end, runtime["max_cloud_percentage"], integration, only=missing
+            )
+            layer_dir = settings.storage_path / "satellite" / str(observation_id)
+            layer_dir.mkdir(parents=True, exist_ok=True)
+            for name, content in images.items():
+                layer_path = layer_dir / f"{name}.png"
+                layer_path.write_bytes(content)
+                local_index_image_paths[name] = str(layer_path)
+            for name, message in visual_errors.items():
+                logger.warning("satellite_index_image_failed", index=name, error=message)
+            if visual_errors:
+                phase_errors.append(
+                    "Capas visuales: " + ", ".join(f"{name} ({message})" for name, message in visual_errors.items())
+                )
+            visual_layers_ready = len(local_index_image_paths) == len(INDEX_NAMES)
 
         processing_error = " | ".join(phase_errors) or None
-        if image_ready and statistics_ready:
+        if image_ready and statistics_ready and visual_layers_ready:
             processing_status = "PROCESSED"
-        elif image_ready or statistics_ready:
+        elif image_ready or statistics_ready or local_index_image_paths:
             processing_status = "PARTIAL"
         else:
             processing_status = "FAILED"
@@ -1023,6 +1515,7 @@ async def sync_satellite_for_station(
         "processing_status": processing_status,
         "processing_error": processing_error,
         "local_image_path": local_image_path,
+        "local_index_image_paths": local_index_image_paths,
         "preview_url": preview_url,
         "statistics": statistics,
         "indices": indices,
@@ -1041,7 +1534,13 @@ async def sync_satellite_for_station(
         db.add(row)
     await db.commit()
     await db.refresh(row)
-    analysis = build_satellite_analysis(row, plot, previous=previous, config=_integration_config(await _integration(db)))
+    analysis_integration = await _integration(db)
+    analysis = build_satellite_analysis(
+        row,
+        plot,
+        previous=previous,
+        config={**_integration_config(analysis_integration), **satellite_runtime_config(analysis_integration)},
+    )
     return {
         "status": processing_status,
         "observation_id": str(row.id),
@@ -1053,9 +1552,86 @@ async def sync_satellite_for_station(
         "indices": (row.raw_payload or {}).get("indices") or {},
         "processing_error": processing_error,
         "image_available": bool(local_image_path),
+        "index_images": {name: f"/api/v1/public/satellite/{row.id}/indices/{name}.png" for name in local_index_image_paths},
+        "visual_layers_available": len(local_index_image_paths),
         "processing_credentials_configured": credentials_ready,
         "plot_id": str(plot.id),
         "analysis": analysis,
+        "runtime_config": runtime,
+    }
+
+
+async def catalog_scenes_for_station(
+    db: AsyncSession,
+    station: Station,
+    *,
+    days: int | None = None,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+    """List recent Sentinel-2 scenes for the station polygon without processing them."""
+    integration = await _integration(db)
+    runtime = satellite_runtime_config(integration)
+    period_days = max(1, min(int(days or runtime["history_days"]), 366))
+    item_limit = max(1, min(int(max_items or runtime["history_limit"]), 60))
+    date_to = datetime.now(UTC).date()
+    geometry = station_geometry(station)
+    date_from = date_to - timedelta(days=period_days)
+    cache_key = json.dumps(
+        {
+            "station_id": str(station.id),
+            "geometry": geometry,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "max_cloud": runtime["max_cloud_percentage"],
+            "limit": max(item_limit, runtime["catalog_limit"]),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cached = _catalog_scene_cache.get(cache_key) or {}
+    catalog_warning: str | None = None
+    stale_cache = False
+    if cached.get("expires_at") and cached["expires_at"] > datetime.now(UTC):
+        result = cached["result"]
+    else:
+        try:
+            result = await _search_copernicus_catalog_for_geometry(
+                integration,
+                geometry,
+                date_from,
+                date_to,
+                runtime["max_cloud_percentage"],
+                max(item_limit, runtime["catalog_limit"]),
+            )
+            _catalog_scene_cache[cache_key] = {
+                "expires_at": datetime.now(UTC) + timedelta(minutes=30),
+                "result": result,
+            }
+        except CatalogTemporaryError as exc:
+            # A temporary CDSE outage must not empty the map when a previous
+            # successful catalogue response is still available in memory.
+            if not cached.get("result"):
+                raise
+            result = cached["result"]
+            catalog_warning = str(exc)[:1000]
+            stale_cache = True
+            logger.warning(
+                "copernicus_catalog_stale_cache_used",
+                station_id=str(station.id),
+                warning=catalog_warning,
+            )
+    features = result["features"][:item_limit]
+    return {
+        "features": features,
+        "count": len(features),
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
+        "runtime_config": runtime,
+        "catalog_status": "STALE_CACHE" if stale_cache else "CURRENT",
+        "catalog_warning": catalog_warning,
+        "catalog_url": result.get("catalog_url"),
+        "catalog_mode": result.get("catalog_mode"),
+        "fallback_used": bool(result.get("fallback_used")),
     }
 
 
@@ -1091,6 +1667,7 @@ async def test_copernicus_integration(
         }
 
     integration = await _integration(db)
+    runtime = satellite_runtime_config(integration)
     client_id, client_secret = _oauth_credentials(integration)
     diagnostics: dict[str, Any] = {
         "geometry": "PENDING",
@@ -1136,12 +1713,31 @@ async def test_copernicus_integration(
         catalog = await _search_copernicus_catalog_for_geometry(
             integration,
             geometry,
-            today - timedelta(days=settings.satellite_lookback_days),
+            today - timedelta(days=runtime["lookback_days"]),
             today,
-            settings.satellite_max_cloud_percentage,
+            runtime["max_cloud_percentage"],
+            runtime["catalog_limit"],
         )
         diagnostics["catalog"] = "COMPLETED"
         diagnostics["catalog_scenes"] = catalog["count"]
+    except CatalogTemporaryError as exc:
+        message = str(exc)[:1000]
+        diagnostics["catalog"] = "DEGRADED"
+        diagnostics["catalog_error"] = message
+        diagnostics["catalog_retryable"] = True
+        return {
+            "station_id": str(station.id),
+            "station": station.name,
+            "status": "PARTIAL",
+            "processing_error": (
+                "El catálogo de Copernicus está temporalmente inestable. "
+                "La geometría de la estación es válida y la prueba puede repetirse sin cambiar el polígono. "
+                f"Detalle técnico: {message}"
+            ),
+            "image_available": False,
+            "processing_credentials_configured": bool(client_id and client_secret),
+            "diagnostics": diagnostics,
+        }
     except Exception as exc:
         message = str(exc)[:1000]
         diagnostics["catalog"] = "FAILED"
@@ -1169,8 +1765,7 @@ async def test_copernicus_integration(
 
     feature = catalog["features"][0]
     captured_at = _feature_datetime(feature)
-    start = captured_at - timedelta(hours=12)
-    end = captured_at + timedelta(hours=36)
+    start, end = _scene_time_range(captured_at)
 
     if not (client_id and client_secret):
         return {
@@ -1207,7 +1802,7 @@ async def test_copernicus_integration(
     image_available = False
     process_error: str | None = None
     try:
-        image = await _process_image(geometry, start, end, settings.satellite_max_cloud_percentage, integration)
+        image = await _process_image(geometry, start, end, runtime["max_cloud_percentage"], integration)
         image_available = bool(image)
         diagnostics["process"] = "COMPLETED" if image_available else "NO_IMAGE"
     except Exception as exc:
@@ -1215,10 +1810,27 @@ async def test_copernicus_integration(
         diagnostics["process"] = "FAILED"
         diagnostics["process_error"] = process_error
 
+    visual_layers_available = 0
+    visual_error: str | None = None
+    try:
+        visual_layers, visual_errors = await _process_index_images(
+            geometry, start, end, runtime["max_cloud_percentage"], integration
+        )
+        visual_layers_available = len(visual_layers)
+        diagnostics["visual_layers"] = "COMPLETED" if visual_layers_available == len(INDEX_NAMES) else "PARTIAL"
+        diagnostics["visual_layers_available"] = visual_layers_available
+        diagnostics["visual_layer_errors"] = visual_errors
+        if visual_errors:
+            visual_error = ", ".join(f"{name}: {message}" for name, message in visual_errors.items())[:1000]
+    except Exception as exc:
+        visual_error = str(exc)[:1000]
+        diagnostics["visual_layers"] = "FAILED"
+        diagnostics["visual_layers_error"] = visual_error
+
     stats_result: dict[str, Any] = {}
     statistics_error: str | None = None
     try:
-        stats_result = await _index_statistics(geometry, start, end, settings.satellite_max_cloud_percentage, integration)
+        stats_result = await _index_statistics(geometry, start, end, runtime["max_cloud_percentage"], integration)
         has_indices = any(stats_result.get(name) is not None for name in INDEX_NAMES)
         diagnostics["statistics"] = "COMPLETED" if has_indices else "NO_VALID_PIXELS"
     except Exception as exc:
@@ -1226,9 +1838,9 @@ async def test_copernicus_integration(
         diagnostics["statistics"] = "FAILED"
         diagnostics["statistics_error"] = statistics_error
 
-    phase_errors = [item for item in (process_error, statistics_error) if item]
-    completed = image_available and diagnostics["statistics"] == "COMPLETED"
-    partial = image_available or diagnostics["statistics"] in {"COMPLETED", "NO_VALID_PIXELS"}
+    phase_errors = [item for item in (process_error, visual_error, statistics_error) if item]
+    completed = image_available and visual_layers_available == len(INDEX_NAMES) and diagnostics["statistics"] == "COMPLETED"
+    partial = image_available or visual_layers_available > 0 or diagnostics["statistics"] in {"COMPLETED", "NO_VALID_PIXELS"}
     status = "PROCESSED" if completed else "PARTIAL" if partial else "FAILED"
     return {
         "station_id": str(station.id),
@@ -1236,6 +1848,7 @@ async def test_copernicus_integration(
         "status": status,
         "processing_error": " | ".join(phase_errors) or None,
         "image_available": image_available,
+        "visual_layers_available": visual_layers_available,
         "processing_credentials_configured": True,
         "scene_id": feature.get("id"),
         "captured_at": captured_at.isoformat(),

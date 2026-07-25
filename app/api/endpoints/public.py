@@ -22,17 +22,24 @@ from app.db.models import (
     WeatherForecast,
     WeatherReading,
 )
-from app.schemas.actions import PublicSatelliteRefreshPayload
+from app.schemas.actions import (
+    PublicSatelliteMapAgentPayload,
+    PublicSatelliteMapProcessPayload,
+    PublicSatelliteRefreshPayload,
+)
 from app.schemas.resources import PhenologyCalculate
 from app.services.alert_engine import classify_alert_level, maximum_level
 from app.services.disease_forecast import build_forecast_risk
 from app.services.forecast import refresh_station_forecast
 from app.services.phenology import calculate_stage
 from app.services.serialization import model_dict
+from app.services.satellite_map import build_satellite_map_context, generate_satellite_map_agent
 from app.services.satellite import (
+    INDEX_NAMES,
     copernicus_credentials_configured,
     latest_satellite_observation,
     local_satellite_image_path,
+    local_satellite_index_image_path,
     satellite_observation_payload,
     sync_satellite_for_station,
 )
@@ -78,6 +85,78 @@ async def public_crops(db: DbSession) -> list[dict]:
         )
     ).all()
     return [model_dict(item, exclude={"created_by", "deleted_at"}) for item in crops]
+
+
+@router.get("/public/satellite-map")
+async def public_satellite_map(
+    station_id: uuid.UUID,
+    crop_code: str,
+    db: DbSession,
+    observation_id: uuid.UUID | None = None,
+    history_days: int | None = Query(default=None, ge=7, le=366),
+) -> dict:
+    try:
+        return await build_satellite_map_context(
+            db,
+            station_id,
+            crop_code,
+            observation_id=observation_id,
+            history_days=history_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/public/satellite-map/process")
+async def public_satellite_map_process(
+    payload: PublicSatelliteMapProcessPayload,
+    db: DbSession,
+) -> dict:
+    crop = await db.scalar(
+        select(Crop).where(
+            Crop.code == payload.crop_code.upper(),
+            Crop.active.is_(True),
+            Crop.deleted_at.is_(None),
+        )
+    )
+    if not crop:
+        raise HTTPException(status_code=404, detail="Cultivo no encontrado")
+    try:
+        result = await sync_satellite_for_station(
+            db,
+            payload.station_id,
+            crop_id=crop.id,
+            force=payload.force,
+            target_date=payload.captured_date,
+            scene_id=payload.scene_id,
+        )
+        observation_id = result.get("observation_id")
+        context = await build_satellite_map_context(
+            db,
+            payload.station_id,
+            payload.crop_code,
+            observation_id=uuid.UUID(observation_id) if observation_id else None,
+            history_days=payload.history_days,
+        )
+        return {"result": result, "context": context}
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/public/satellite-map/agent")
+async def public_satellite_map_agent(
+    payload: PublicSatelliteMapAgentPayload,
+    db: DbSession,
+) -> dict:
+    try:
+        return await generate_satellite_map_agent(
+            db,
+            payload.station_id,
+            payload.crop_code,
+            payload.observation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/public/crop-cycles", deprecated=True)
@@ -154,7 +233,29 @@ async def public_satellite_image(observation_id: uuid.UUID, db: DbSession):
     path = local_satellite_image_path(observation)
     if not path:
         raise HTTPException(status_code=404, detail="La observación no tiene una imagen local procesada")
-    return FileResponse(path, media_type="image/jpeg", filename=f"sentinel-{observation_id}.jpg")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
+@router.get("/public/satellite/{observation_id}/indices/{index_name}.png")
+async def public_satellite_index_image(observation_id: uuid.UUID, index_name: str, db: DbSession):
+    normalized = index_name.strip().lower()
+    if normalized not in INDEX_NAMES:
+        raise HTTPException(status_code=404, detail="Índice satelital no soportado")
+    observation = await db.get(SatelliteObservation, observation_id)
+    if not observation:
+        raise HTTPException(status_code=404, detail="Observación satelital no encontrada")
+    path = local_satellite_index_image_path(observation, normalized)
+    if not path:
+        raise HTTPException(status_code=404, detail=f"La observación no tiene la capa {normalized.upper()} procesada")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 @router.get("/public/dashboard")

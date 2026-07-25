@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AuditLog, User
+
+
+def _json_safe(value: Any) -> Any:
+    """Convierte el contenido de auditoría a valores compatibles con JSONB.
+
+    Las capturas de auditoría pueden contener datetime, date, UUID, Enum,
+    Decimal y modelos Pydantic. El serializador JSON estándar de SQLAlchemy
+    no puede guardar directamente esos objetos de Python.
+    """
+    if value is None:
+        return None
+    return jsonable_encoder(value)
 
 
 async def write_audit(
@@ -27,8 +42,8 @@ async def write_audit(
             entity_id=entity_id,
             ip_address=request.client.host if request and request.client else None,
             user_agent=request.headers.get("user-agent")[:500] if request else None,
-            before_data=before,
-            after_data=after,
-            extra_data=extra or {},
+            before_data=_json_safe(before),
+            after_data=_json_safe(after),
+            extra_data=_json_safe(extra or {}),
         )
     )
