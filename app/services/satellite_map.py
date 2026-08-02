@@ -36,6 +36,7 @@ from app.services.satellite import (
     catalog_scenes_for_station,
     ensure_station_plot,
     local_satellite_image_path,
+    satellite_observation_is_complete,
     satellite_observation_payload,
     satellite_runtime_config,
     station_geometry,
@@ -198,6 +199,13 @@ def _observation_summary(observation: SatelliteObservation) -> dict[str, Any]:
         "image_available": bool(local_satellite_image_path(observation)),
         "indices_available": sum(value is not None for value in indices.values()),
         "indices": indices,
+        "quality": raw.get("quality") or {},
+        "data_source_mode": raw.get("data_source_mode") or "LATEST_VALID_SCENE",
+        "fallback_used": bool(raw.get("fallback_used")),
+        "data_warning": raw.get("data_warning"),
+        "latest_catalog_scene_at": raw.get("latest_catalog_scene_at"),
+        "catalog_checked_at": raw.get("catalog_checked_at"),
+        "selected_scene_rank": raw.get("selected_scene_rank"),
     }
 
 
@@ -384,17 +392,36 @@ async def build_satellite_map_context(
             if not selected or selected.plot_id != plot.id:
                 raise ValueError("La observación seleccionada no pertenece a esta estación")
     elif observations:
-        selected = observations[0]
+        # The public widget must not replace a usable NDVI with a newer cloudy
+        # partial row. Prefer the newest complete observation and retain the
+        # newer catalogue acquisition only as freshness metadata.
+        selected = next((item for item in observations if satellite_observation_is_complete(item)), observations[0])
 
     selected_payload = await satellite_observation_payload(db, selected, plot) if selected else None
     previous_row = None
     if selected:
-        previous_row = await db.scalar(
-            select(SatelliteObservation)
-            .where(SatelliteObservation.plot_id == plot.id, SatelliteObservation.captured_at < selected.captured_at)
-            .order_by(SatelliteObservation.captured_at.desc())
-            .limit(1)
+        previous_row = next(
+            (
+                item for item in observations
+                if item.captured_at < selected.captured_at and satellite_observation_is_complete(item)
+            ),
+            None,
         )
+        if previous_row is None:
+            older_rows = list(
+                (
+                    await db.scalars(
+                        select(SatelliteObservation)
+                        .where(
+                            SatelliteObservation.plot_id == plot.id,
+                            SatelliteObservation.captured_at < selected.captured_at,
+                        )
+                        .order_by(SatelliteObservation.captured_at.desc())
+                        .limit(40)
+                    )
+                ).all()
+            )
+            previous_row = next((item for item in older_rows if satellite_observation_is_complete(item)), None)
     previous_payload = await satellite_observation_payload(db, previous_row, plot) if previous_row else None
 
     local_date: date | None = None

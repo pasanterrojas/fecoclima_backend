@@ -84,7 +84,9 @@ class PublicSatelliteRefreshPayload(BaseModel):
 
     station_id: UUID
     crop_code: str = Field(min_length=1, max_length=30)
-    force: bool = True
+    # Se conserva por compatibilidad con clientes anteriores, pero los endpoints
+    # públicos aplican el caché compartido para proteger la cuota de Copernicus.
+    force: bool = False
 
 
 class PublicSatelliteMapProcessPayload(BaseModel):
@@ -93,12 +95,15 @@ class PublicSatelliteMapProcessPayload(BaseModel):
     scene_id: str | None = Field(default=None, min_length=1, max_length=500)
     captured_date: date | None = None
     history_days: int | None = Field(default=None, ge=7, le=366)
-    force: bool = True
+    # El procesamiento automático usa caché; una escena/fecha explícita siempre
+    # se procesa aunque este indicador sea falso.
+    force: bool = False
 
     @model_validator(mode="after")
     def validate_scene(self):
-        if not self.scene_id and not self.captured_date:
-            raise ValueError("Seleccione una escena o una fecha para procesar")
+        # Sin escena ni fecha, el backend ejecuta la selección automática de la
+        # adquisición válida más reciente. Con scene_id/captured_date se conserva
+        # el procesamiento manual de una fecha elegida por el usuario.
         return self
 
 

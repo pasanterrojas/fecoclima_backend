@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Request
@@ -7,6 +8,11 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AuditLog, User
+
+
+def _serialize_datetime(value: datetime) -> str:
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat().replace("+00:00", "Z")
 
 
 def _json_safe(value: Any) -> Any:
@@ -18,7 +24,7 @@ def _json_safe(value: Any) -> Any:
     """
     if value is None:
         return None
-    return jsonable_encoder(value)
+    return jsonable_encoder(value, custom_encoder={datetime: _serialize_datetime})
 
 
 async def write_audit(

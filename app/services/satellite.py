@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import structlog
-from sqlalchemy import case, or_, select
+from sqlalchemy import case, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -319,11 +319,28 @@ def _bounded_number(value: Any, default: float, minimum: float, maximum: float) 
 
 
 def satellite_runtime_config(integration: IntegrationConfig | None) -> dict[str, Any]:
-    """Return validated Copernicus behaviour configured from Admin → Integraciones."""
+    """Return validated Copernicus behaviour configured from Admin → Integraciones.
+
+    The defaults are deliberately conservative for a public application: a
+    catalogue refresh is cached, only a bounded number of scenes are screened,
+    and a scene is accepted only when the parcel contains enough valid pixels.
+    """
     config = _integration_config(integration)
+    minimum_coverage = _bounded_number(
+        config.get("minimum_valid_coverage_percentage"), 20, 0, 100
+    )
+    preferred_coverage = _bounded_number(
+        config.get("preferred_valid_coverage_percentage"), 60, minimum_coverage, 100
+    )
     return {
         "max_cloud_percentage": _bounded_number(
             config.get("max_cloud_percentage"), settings.satellite_max_cloud_percentage, 0, 100
+        ),
+        # eo:cloud_cover/maxCloudCoverage describe the complete Sentinel tile,
+        # not only the parcel. Keep this provider pre-filter broad and decide
+        # acceptance with SCL/dataMask coverage inside the GeoJSON.
+        "provider_tile_cloud_ceiling_percentage": _bounded_number(
+            config.get("provider_tile_cloud_ceiling_percentage"), 90, 0, 100
         ),
         "lookback_days": int(_bounded_number(
             config.get("lookback_days"), settings.satellite_lookback_days, 1, 366
@@ -334,7 +351,16 @@ def satellite_runtime_config(integration: IntegrationConfig | None) -> dict[str,
             config.get("refresh_hours"), settings.satellite_refresh_hours, 1, 168
         )),
         "catalog_limit": int(_bounded_number(config.get("catalog_limit"), 30, 5, 100)),
+        "scene_quality_candidates": int(_bounded_number(
+            config.get("scene_quality_candidates"), 12, 1, 40
+        )),
+        "statistics_resolution_m": _bounded_number(
+            config.get("statistics_resolution_m"), 10, 5, 60
+        ),
         "minimum_valid_pixels": int(_bounded_number(config.get("minimum_valid_pixels"), 25, 1, 100000)),
+        "minimum_valid_coverage_percentage": minimum_coverage,
+        "preferred_valid_coverage_percentage": preferred_coverage,
+        "max_stale_days": int(_bounded_number(config.get("max_stale_days"), 45, 1, 366)),
         "default_map_opacity": _bounded_number(config.get("default_map_opacity"), 0.78, 0.1, 1),
     }
 
@@ -374,6 +400,87 @@ def _geometry_bbox(geometry: dict[str, Any]) -> list[float]:
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
     return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _geometry_points(geometry: dict[str, Any]) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
+                points.append((float(value[0]), float(value[1])))
+                return
+            for item in value:
+                collect(item)
+
+    collect(geometry.get("coordinates"))
+    return points
+
+
+def _geometry_reference_latitude(geometry: dict[str, Any]) -> float:
+    points = _geometry_points(geometry)
+    if not points:
+        raise ValueError("La geozona no contiene coordenadas utilizables")
+    return sum(latitude for _, latitude in points) / len(points)
+
+
+def _statistics_resolution_degrees(
+    geometry: dict[str, Any],
+    resolution_m: float,
+) -> tuple[float, float]:
+    """Convert a metric target resolution to WGS84 degree units.
+
+    Statistical API interprets ``resx`` and ``resy`` in the units of the
+    bounds CRS. FECOCLIMA sends GeoJSON in EPSG:4326, therefore passing the
+    number ``10`` meant ten *degrees* and collapsed every parcel to one sample.
+    This conversion preserves an approximately 10 metre sampling grid at the
+    parcel latitude without adding a projection dependency.
+    """
+    latitude = _geometry_reference_latitude(geometry)
+    metres_per_degree_latitude = 111_320.0
+    metres_per_degree_longitude = metres_per_degree_latitude * max(
+        0.05, abs(math.cos(math.radians(latitude)))
+    )
+    return (
+        float(resolution_m) / metres_per_degree_longitude,
+        float(resolution_m) / metres_per_degree_latitude,
+    )
+
+
+def _ring_area_m2(ring: list[list[float]], reference_latitude: float) -> float:
+    if len(ring) < 4:
+        return 0.0
+    metres_per_degree_latitude = 111_320.0
+    metres_per_degree_longitude = metres_per_degree_latitude * max(
+        0.05, abs(math.cos(math.radians(reference_latitude)))
+    )
+    origin_longitude = float(ring[0][0])
+    origin_latitude = float(ring[0][1])
+    area = 0.0
+    for current, following in zip(ring, ring[1:]):
+        x1 = (float(current[0]) - origin_longitude) * metres_per_degree_longitude
+        y1 = (float(current[1]) - origin_latitude) * metres_per_degree_latitude
+        x2 = (float(following[0]) - origin_longitude) * metres_per_degree_longitude
+        y2 = (float(following[1]) - origin_latitude) * metres_per_degree_latitude
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2.0
+
+
+def _geometry_area_m2(geometry: dict[str, Any]) -> float:
+    reference_latitude = _geometry_reference_latitude(geometry)
+
+    def polygon_area(polygon: list[list[list[float]]]) -> float:
+        if not polygon:
+            return 0.0
+        exterior = _ring_area_m2(polygon[0], reference_latitude)
+        holes = sum(_ring_area_m2(ring, reference_latitude) for ring in polygon[1:])
+        return max(0.0, exterior - holes)
+
+    if geometry.get("type") == "Polygon":
+        return polygon_area(geometry.get("coordinates") or [])
+    if geometry.get("type") == "MultiPolygon":
+        return sum(polygon_area(polygon) for polygon in geometry.get("coordinates") or [])
+    return 0.0
 
 
 def _catalog_endpoint_candidates(integration: IntegrationConfig | None) -> list[tuple[str, bool]]:
@@ -728,9 +835,25 @@ function evaluatePixel(s) {{
 
 
 def _scene_time_range(captured_at: datetime) -> tuple[datetime, datetime]:
-    """Use one narrow acquisition window for RGB, every index and statistics."""
+    """Return a narrow acquisition window for RGB and visual index rasters."""
     value = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=UTC)
+    value = value.astimezone(UTC)
     return value - timedelta(minutes=5), value + timedelta(minutes=45)
+
+
+def _statistics_time_range(captured_at: datetime) -> tuple[datetime, datetime]:
+    """Return the full UTC day required by a P1D Statistical API interval.
+
+    The previous implementation sent a roughly 50-minute range together with
+    ``P1D``. Copernicus normally skips an incomplete final interval, which can
+    produce an HTTP 200 response with no statistical rows. Using the complete
+    UTC day keeps the statistics tied to the same acquisition date while
+    satisfying the aggregation contract.
+    """
+    value = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=UTC)
+    value = value.astimezone(UTC)
+    start = datetime(value.year, value.month, value.day, tzinfo=UTC)
+    return start, start + timedelta(days=1)
 
 
 INDEX_EVALSCRIPT = """//VERSION=3
@@ -892,32 +1015,79 @@ def _parse_output_statistics(result: dict[str, Any], output_name: str) -> dict[s
             rows.append(stats)
     if not rows:
         return {}
-    # A single-day request normally yields one row. Weighted mean keeps the
-    # parser safe if the provider returns more than one interval.
-    total = sum(int(item.get("sampleCount") or 0) for item in rows)
-    weighted_mean = None
-    if total:
-        weighted_mean = sum(float(item.get("mean") or 0) * int(item.get("sampleCount") or 0) for item in rows) / total
+
+    sample_count = sum(int(item.get("sampleCount") or 0) for item in rows)
+    no_data_count = sum(int(item.get("noDataCount") or 0) for item in rows)
+    valid_pixel_count = max(0, sample_count - no_data_count)
+
+    weighted_rows: list[tuple[float, int]] = []
+    for item in rows:
+        mean = item.get("mean")
+        if mean is None:
+            continue
+        row_samples = int(item.get("sampleCount") or 0)
+        row_no_data = int(item.get("noDataCount") or 0)
+        row_valid = max(0, row_samples - row_no_data)
+        if row_valid:
+            weighted_rows.append((float(mean), row_valid))
+    weighted_total = sum(weight for _, weight in weighted_rows)
+    weighted_mean = (
+        sum(value * weight for value, weight in weighted_rows) / weighted_total
+        if weighted_total
+        else None
+    )
     percentiles = rows[-1].get("percentiles") or {}
+    coverage = round(valid_pixel_count * 100 / sample_count, 2) if sample_count else 0.0
     return {
         "min": min(float(item["min"]) for item in rows if item.get("min") is not None) if any(item.get("min") is not None for item in rows) else None,
         "max": max(float(item["max"]) for item in rows if item.get("max") is not None) if any(item.get("max") is not None for item in rows) else None,
         "mean": None if weighted_mean is None else round(weighted_mean, 4),
         "stdev": _stat_value(rows[-1], "stDev"),
-        "sample_count": total or _stat_value(rows[-1], "sampleCount"),
-        "no_data_count": sum(int(item.get("noDataCount") or 0) for item in rows),
+        "sample_count": sample_count,
+        "no_data_count": no_data_count,
+        "valid_pixel_count": valid_pixel_count,
+        "valid_coverage_percentage": coverage,
         "percentiles": {str(key): round(float(value), 4) for key, value in percentiles.items()},
+    }
+
+
+def _statistics_quality(statistics: dict[str, Any], *, interval_count: int = 0) -> dict[str, Any]:
+    reference = statistics.get("ndvi") or next(
+        (value for value in statistics.values() if isinstance(value, dict) and value),
+        {},
+    )
+    total_pixels = int(reference.get("sample_count") or 0)
+    no_data_pixels = int(reference.get("no_data_count") or 0)
+    valid_pixels = int(reference.get("valid_pixel_count") or max(0, total_pixels - no_data_pixels))
+    valid_coverage = (
+        float(reference.get("valid_coverage_percentage"))
+        if reference.get("valid_coverage_percentage") is not None
+        else (valid_pixels * 100 / total_pixels if total_pixels else 0.0)
+    )
+    status = "COMPLETED" if valid_pixels > 0 else "EMPTY_INTERVAL" if interval_count == 0 else "NO_VALID_PIXELS"
+    return {
+        "status": status,
+        "interval_count": int(interval_count),
+        "total_pixels": total_pixels,
+        "valid_pixels": valid_pixels,
+        "no_data_pixels": no_data_pixels,
+        "valid_coverage_percentage": round(valid_coverage, 2),
     }
 
 
 async def _index_statistics(
     geometry: dict[str, Any],
-    time_from: datetime,
-    time_to: datetime,
+    captured_at: datetime,
     max_cloud: float,
     integration: IntegrationConfig | None,
+    *,
+    resolution_m: float = 10.0,
 ) -> dict[str, Any]:
     token = await _access_token(integration)
+    time_from, time_to = _statistics_time_range(captured_at)
+    resx_degrees, resy_degrees = _statistics_resolution_degrees(geometry, resolution_m)
+    area_m2 = _geometry_area_m2(geometry)
+    estimated_pixels = max(1, int(round(area_m2 / max(1.0, resolution_m**2))))
     calculations = {
         name: {
             "statistics": {
@@ -941,9 +1111,12 @@ async def _index_statistics(
         "aggregation": {
             "timeRange": {"from": time_from.isoformat().replace("+00:00", "Z"), "to": time_to.isoformat().replace("+00:00", "Z")},
             "aggregationInterval": {"of": "P1D"},
+            "lastIntervalBehavior": "SHORTEN",
             "evalscript": INDEX_EVALSCRIPT,
-            "resx": 10,
-            "resy": 10,
+            # Bounds are EPSG:4326. Statistical API reads resx/resy in CRS
+            # units, therefore these values must be degrees, not metres.
+            "resx": resx_degrees,
+            "resy": resy_degrees,
         },
         "calculations": calculations,
     }
@@ -958,10 +1131,377 @@ async def _index_statistics(
         result = response.json()
     if result.get("status") not in {None, "OK"}:
         raise RuntimeError(f"Statistical API devolvió estado {result.get('status')}: {json.dumps(result, ensure_ascii=False)[:1000]}")
+    interval_count = len(result.get("data") or [])
     statistics = {name: _parse_output_statistics(result, name) for name in INDEX_NAMES}
     indices = {name: (statistics[name].get("mean") if statistics[name] else None) for name in INDEX_NAMES}
-    return {**indices, "indices": indices, "statistics": statistics}
+    quality = _statistics_quality(statistics, interval_count=interval_count)
+    quality.update({
+        "estimated_aoi_pixels": estimated_pixels,
+        "geometry_area_m2": round(area_m2, 2),
+        "statistics_resolution_m": float(resolution_m),
+        "statistics_resx_degrees": resx_degrees,
+        "statistics_resy_degrees": resy_degrees,
+    })
+    return {
+        **indices,
+        "indices": indices,
+        "statistics": statistics,
+        "quality": quality,
+        "statistics_grid": {
+            "crs": "EPSG:4326",
+            "resolution_m": float(resolution_m),
+            "resx_degrees": resx_degrees,
+            "resy_degrees": resy_degrees,
+            "geometry_area_m2": round(area_m2, 2),
+            "estimated_aoi_pixels": estimated_pixels,
+        },
+        "statistics_time_range": {
+            "from": time_from.isoformat(),
+            "to": time_to.isoformat(),
+        },
+    }
 
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _observation_indices(observation: SatelliteObservation | None) -> dict[str, Any]:
+    if not observation:
+        return {}
+    raw = observation.raw_payload or {}
+    values = dict(raw.get("indices") or {})
+    values.setdefault("ndvi", observation.ndvi)
+    values.setdefault("ndmi", observation.ndmi)
+    values.setdefault("ndwi", observation.ndwi)
+    return values
+
+
+def satellite_observation_is_complete(observation: SatelliteObservation | None) -> bool:
+    if not observation:
+        return False
+    raw = observation.raw_payload or {}
+    has_indices = any(value is not None for value in _observation_indices(observation).values())
+    return bool(
+        has_indices
+        and local_satellite_image_path(observation)
+        and len(_local_index_paths(observation)) == len(INDEX_NAMES)
+        and str(raw.get("processing_status") or "") == "PROCESSED"
+    )
+
+
+def _observation_quality(observation: SatelliteObservation | None) -> dict[str, Any]:
+    if not observation:
+        return {}
+    raw = observation.raw_payload or {}
+    quality = raw.get("quality")
+    if isinstance(quality, dict) and quality:
+        return dict(quality)
+    statistics = raw.get("statistics") or {}
+    return _statistics_quality(statistics, interval_count=1 if statistics else 0)
+
+
+def _effective_minimum_valid_pixels(quality: dict[str, Any], runtime: dict[str, Any]) -> int:
+    total_pixels = int(quality.get("total_pixels") or 0)
+    configured_minimum = int(runtime["minimum_valid_pixels"])
+    if total_pixels <= 0:
+        return configured_minimum
+    coverage_minimum = max(
+        1,
+        math.ceil(total_pixels * float(runtime["minimum_valid_coverage_percentage"]) / 100),
+    )
+    return min(configured_minimum, coverage_minimum)
+
+
+def _quality_acceptance(quality: dict[str, Any], runtime: dict[str, Any]) -> tuple[bool, str]:
+    valid_pixels = int(quality.get("valid_pixels") or 0)
+    total_pixels = int(quality.get("total_pixels") or 0)
+    estimated_pixels = int(quality.get("estimated_aoi_pixels") or 0)
+    coverage = float(quality.get("valid_coverage_percentage") or 0)
+    effective_minimum = _effective_minimum_valid_pixels(quality, runtime)
+    quality["effective_minimum_valid_pixels"] = effective_minimum
+
+    if quality.get("status") == "EMPTY_INTERVAL":
+        return False, "Statistical API no devolvió intervalos para la fecha"
+    if total_pixels <= 1 and estimated_pixels >= 4:
+        return False, (
+            "La cuadrícula estadística produjo un solo píxel para una geozona mayor; "
+            "revise la resolución y el CRS"
+        )
+    if valid_pixels < effective_minimum:
+        return False, f"Solo {valid_pixels} píxeles válidos; mínimo efectivo {effective_minimum}"
+    if coverage < float(runtime["minimum_valid_coverage_percentage"]):
+        return False, (
+            f"Cobertura válida {coverage:.1f}%; mínimo "
+            f"{float(runtime['minimum_valid_coverage_percentage']):.1f}%"
+        )
+    return True, "Escena aceptada"
+
+
+def _quality_band(quality: dict[str, Any], runtime: dict[str, Any]) -> str:
+    accepted, _ = _quality_acceptance(quality, runtime)
+    if not accepted:
+        return "REJECTED"
+    coverage = float(quality.get("valid_coverage_percentage") or 0)
+    if coverage >= float(runtime["preferred_valid_coverage_percentage"]):
+        return "PREFERRED"
+    return "ACCEPTABLE"
+
+
+def _observation_freshness(
+    observation: SatelliteObservation,
+    runtime: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    reference = now or datetime.now(UTC)
+    captured_at = observation.captured_at
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=UTC)
+    else:
+        captured_at = captured_at.astimezone(UTC)
+    age_days = max(0.0, (reference - captured_at).total_seconds() / 86_400)
+    max_stale_days = int(runtime["max_stale_days"])
+    return {
+        "data_age_days": round(age_days, 1),
+        "data_is_stale": age_days > max_stale_days,
+        "max_stale_days": max_stale_days,
+    }
+
+
+def _warning_with_staleness(
+    warning: str | None,
+    freshness: dict[str, Any],
+) -> str | None:
+    if not freshness.get("data_is_stale"):
+        return warning
+    stale_message = (
+        f"El último producto válido tiene {float(freshness['data_age_days']):.1f} días de antigüedad; "
+        f"supera el máximo configurado de {int(freshness['max_stale_days'])} días."
+    )
+    if warning and stale_message not in warning:
+        return f"{warning} {stale_message}"
+    return warning or stale_message
+
+
+async def _latest_complete_observation(
+    db: AsyncSession,
+    plot_id: UUID,
+    *,
+    before: datetime | None = None,
+) -> SatelliteObservation | None:
+    query = select(SatelliteObservation).where(SatelliteObservation.plot_id == plot_id)
+    if before is not None:
+        query = query.where(SatelliteObservation.captured_at < before)
+    rows = list((await db.scalars(query.order_by(SatelliteObservation.captured_at.desc()).limit(80))).all())
+    return next((row for row in rows if satellite_observation_is_complete(row)), None)
+
+
+def _catalog_checked_at(observation: SatelliteObservation | None) -> datetime | None:
+    if not observation:
+        return None
+    raw = observation.raw_payload or {}
+    value = _parse_datetime(raw.get("catalog_checked_at")) or observation.updated_at or observation.created_at
+    return _parse_datetime(value)
+
+
+def satellite_catalog_cache_is_stale(
+    observation: SatelliteObservation | None,
+    runtime: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    checked_at = _catalog_checked_at(observation)
+    if checked_at is None:
+        return True
+    reference = now or datetime.now(UTC)
+    return checked_at < reference - timedelta(hours=max(1, int(runtime["refresh_hours"])))
+
+
+def _cached_observation_result(
+    observation: SatelliteObservation,
+    plot: Plot,
+    *,
+    credentials_ready: bool,
+    runtime: dict[str, Any],
+    status: str | None = None,
+    warning: str | None = None,
+) -> dict[str, Any]:
+    raw = observation.raw_payload or {}
+    index_paths = _local_index_paths(observation)
+    quality = _observation_quality(observation)
+    quality.setdefault("quality_band", _quality_band(quality, runtime))
+    freshness = _observation_freshness(observation, runtime)
+    resolved_warning = _warning_with_staleness(warning or raw.get("data_warning"), freshness)
+    return {
+        "status": status or str(raw.get("processing_status") or "PROCESSED"),
+        "observation_id": str(observation.id),
+        "captured_at": observation.captured_at.isoformat(),
+        "cloud_percentage": observation.cloud_percentage,
+        "ndvi": observation.ndvi,
+        "ndmi": observation.ndmi,
+        "ndwi": observation.ndwi,
+        "indices": _observation_indices(observation),
+        "statistics": raw.get("statistics") or {},
+        "quality": quality,
+        "processing_error": raw.get("processing_error"),
+        "image_available": bool(local_satellite_image_path(observation)),
+        "index_images": {name: f"/api/v1/public/satellite/{observation.id}/indices/{name}.png" for name in index_paths},
+        "visual_layers_available": len(index_paths),
+        "processing_credentials_configured": credentials_ready,
+        "plot_id": str(plot.id),
+        "data_source_mode": raw.get("data_source_mode") or "LATEST_VALID_SCENE",
+        "fallback_used": bool(raw.get("fallback_used")),
+        "data_warning": resolved_warning,
+        **freshness,
+        "latest_catalog_scene_at": raw.get("latest_catalog_scene_at"),
+        "catalog_checked_at": raw.get("catalog_checked_at"),
+        "selected_scene_rank": raw.get("selected_scene_rank"),
+        "runtime_config": runtime,
+    }
+
+
+async def _acquire_station_refresh_lock(db: AsyncSession, station_id: UUID | str, crop_id: UUID | None) -> None:
+    """Serialize one Copernicus refresh per station/crop across API workers.
+
+    PostgreSQL transaction advisory locks prevent simultaneous public requests
+    from launching duplicate Statistical/Process API calls. The lock is released
+    automatically when this session commits or rolls back. Tests using another
+    SQL dialect keep the no-op behaviour.
+    """
+    try:
+        bind = db.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        key = f"fecoclima:satellite:{station_id}:{crop_id or 'all'}"
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+    except Exception as exc:
+        logger.warning("satellite_refresh_lock_unavailable", error=str(exc)[:500])
+
+
+async def _evaluate_catalog_candidates(
+    db: AsyncSession,
+    plot: Plot,
+    features: list[dict[str, Any]],
+    geometry: dict[str, Any],
+    integration: IntegrationConfig | None,
+    runtime: dict[str, Any],
+    *,
+    explicit_scene_id: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]]]:
+    candidates = features
+    if explicit_scene_id:
+        candidates = [item for item in features if str(item.get("id")) == str(explicit_scene_id)]
+    else:
+        # Statistical API mosaics one output per UTC day. Evaluate only the
+        # newest catalogue item for each date so metadata and statistics stay
+        # coherent and duplicate same-day calls are avoided.
+        unique_by_day: list[dict[str, Any]] = []
+        seen_days: set[date] = set()
+        for item in candidates:
+            acquisition_day = _feature_datetime(item).date()
+            if acquisition_day in seen_days:
+                continue
+            seen_days.add(acquisition_day)
+            unique_by_day.append(item)
+        candidates = unique_by_day
+    candidates = candidates[: int(runtime["scene_quality_candidates"])]
+
+    existing_rows = list(
+        (
+            await db.scalars(
+                select(SatelliteObservation)
+                .where(SatelliteObservation.plot_id == plot.id)
+                .order_by(SatelliteObservation.captured_at.desc())
+                .limit(100)
+            )
+        ).all()
+    )
+    existing_by_scene = {
+        str((row.raw_payload or {}).get("scene_id")): row
+        for row in existing_rows
+        if (row.raw_payload or {}).get("scene_id")
+    }
+    attempts: list[dict[str, Any]] = []
+    statistics_by_day: dict[date, dict[str, Any]] = {}
+
+    for rank, feature in enumerate(candidates, start=1):
+        captured_at = _feature_datetime(feature)
+        scene_key = str(feature.get("id") or "")
+        existing = existing_by_scene.get(scene_key)
+        stats_result: dict[str, Any] | None = None
+        source = "COPERNICUS_STATISTICS"
+        try:
+            if existing and any(value is not None for value in _observation_indices(existing).values()):
+                raw = existing.raw_payload or {}
+                cached_statistics = raw.get("statistics") or {}
+                cached_quality = _observation_quality(existing)
+                if cached_statistics and cached_quality.get("valid_pixels"):
+                    stats_result = {
+                        **_observation_indices(existing),
+                        "indices": _observation_indices(existing),
+                        "statistics": cached_statistics,
+                        "quality": cached_quality,
+                        "statistics_grid": raw.get("statistics_grid") or {},
+                        "statistics_time_range": raw.get("statistics_time_range") or {},
+                    }
+                    source = "DATABASE_CACHE"
+            acquisition_day = captured_at.date()
+            if stats_result is None and acquisition_day in statistics_by_day:
+                stats_result = statistics_by_day[acquisition_day]
+                source = "SAME_DAY_CACHE"
+            if stats_result is None:
+                stats_result = await _index_statistics(
+                    geometry,
+                    captured_at,
+                    runtime["provider_tile_cloud_ceiling_percentage"],
+                    integration,
+                    resolution_m=float(runtime["statistics_resolution_m"]),
+                )
+                statistics_by_day[acquisition_day] = stats_result
+            quality = dict(stats_result.get("quality") or {})
+            quality["quality_band"] = _quality_band(quality, runtime)
+            stats_result["quality"] = quality
+            accepted, reason = _quality_acceptance(quality, runtime)
+            attempts.append({
+                "scene_id": scene_key,
+                "captured_at": captured_at.isoformat(),
+                "cloud_percentage": _feature_cloud(feature),
+                "rank": rank,
+                "accepted": accepted,
+                "reason": reason,
+                "source": source,
+                **quality,
+            })
+            if accepted or explicit_scene_id:
+                return feature, stats_result, attempts
+        except Exception as exc:
+            attempts.append({
+                "scene_id": scene_key,
+                "captured_at": captured_at.isoformat(),
+                "cloud_percentage": _feature_cloud(feature),
+                "rank": rank,
+                "accepted": False,
+                "reason": f"No fue posible evaluar la escena: {str(exc)[:500]}",
+                "source": source,
+                "status": "FAILED",
+            })
+            logger.warning(
+                "satellite_scene_quality_failed",
+                scene_id=scene_key,
+                captured_at=captured_at.isoformat(),
+                error=str(exc)[:1000],
+            )
+    return None, None, attempts
 
 def build_satellite_analysis(
     observation: SatelliteObservation,
@@ -1157,6 +1697,9 @@ async def latest_satellite_observation(
     plot = await select_station_plot(db, station_id, crop_id)
     if not plot:
         return None, None
+    valid = await _latest_complete_observation(db, plot.id)
+    if valid:
+        return plot, valid
     observation = await db.scalar(
         select(SatelliteObservation)
         .where(SatelliteObservation.plot_id == plot.id)
@@ -1181,12 +1724,18 @@ async def satellite_observation_payload(
         .limit(1)
     )
     integration = await _integration(db)
+    runtime = satellite_runtime_config(integration)
     raw = observation.raw_payload or {}
+    quality = raw.get("quality") or _observation_quality(observation)
+    quality = dict(quality)
+    quality.setdefault("quality_band", _quality_band(quality, runtime))
+    freshness = _observation_freshness(observation, runtime)
+    data_warning = _warning_with_staleness(raw.get("data_warning"), freshness)
     analysis = build_satellite_analysis(
         observation,
         plot,
         previous=previous,
-        config={**_integration_config(integration), **satellite_runtime_config(integration)},
+        config={**_integration_config(integration), **runtime},
     )
     return {
         **model_dict(observation, exclude={"raw_payload"}),
@@ -1220,6 +1769,16 @@ async def satellite_observation_payload(
             "ndwi": observation.ndwi,
         },
         "statistics": raw.get("statistics") or {},
+        "quality": quality,
+        "statistics_time_range": raw.get("statistics_time_range") or {},
+        "data_source_mode": raw.get("data_source_mode") or "LATEST_VALID_SCENE",
+        "fallback_used": bool(raw.get("fallback_used")),
+        "data_warning": data_warning,
+        **freshness,
+        "latest_catalog_scene_at": raw.get("latest_catalog_scene_at"),
+        "catalog_checked_at": raw.get("catalog_checked_at"),
+        "selected_scene_rank": raw.get("selected_scene_rank"),
+        "candidate_checks": raw.get("candidate_checks") or [],
         "scene_metadata": raw.get("scene_metadata") or {},
         "analysis": analysis,
     }
@@ -1283,39 +1842,27 @@ async def sync_satellite_for_station(
     plot = await ensure_station_plot(db, station, crop_id)
     integration = await _integration(db)
     runtime = satellite_runtime_config(integration)
-    latest = await db.scalar(
-        select(SatelliteObservation)
-        .where(SatelliteObservation.plot_id == plot.id)
-        .order_by(SatelliteObservation.captured_at.desc())
-        .limit(1)
-    )
-    if latest and not force and target_date is None and not scene_id and latest.created_at >= datetime.now(UTC) - timedelta(hours=runtime["refresh_hours"]):
-        latest_raw = latest.raw_payload or {}
-        latest_indices = latest_raw.get("indices") or {}
-        latest_has_indices = any(value is not None for value in latest_indices.values()) or any(
-            value is not None for value in (latest.ndvi, latest.ndmi, latest.ndwi)
+    client_id, client_secret = _oauth_credentials(integration)
+    credentials_ready = bool(client_id and client_secret)
+
+    # Public users can trigger this endpoint at the same time. Serialize the
+    # expensive provider work and re-check the cache after acquiring the lock.
+    await _acquire_station_refresh_lock(db, station.id, crop_id)
+    latest_valid = await _latest_complete_observation(db, plot.id)
+    explicit_request = target_date is not None or scene_id is not None
+    if (
+        latest_valid
+        and not force
+        and not explicit_request
+        and not satellite_catalog_cache_is_stale(latest_valid, runtime)
+    ):
+        return _cached_observation_result(
+            latest_valid,
+            plot,
+            credentials_ready=credentials_ready,
+            runtime=runtime,
         )
-        # Las filas generadas por versiones anteriores podían marcarse como
-        # PROCESSED solo por tener imagen. Si faltan índices, no se devuelve el
-        # caché: se intenta completar Statistical API en la misma escena.
-        latest_visual_layers = _local_index_paths(latest)
-        if latest_has_indices and local_satellite_image_path(latest) and len(latest_visual_layers) == len(INDEX_NAMES):
-            return {
-                "status": str(latest_raw.get("processing_status") or "CURRENT"),
-                "observation_id": str(latest.id),
-                "captured_at": latest.captured_at.isoformat(),
-                "cloud_percentage": latest.cloud_percentage,
-                "ndvi": latest.ndvi,
-                "ndmi": latest.ndmi,
-                "ndwi": latest.ndwi,
-                "indices": latest_indices,
-                "processing_error": latest_raw.get("processing_error"),
-                "image_available": bool(local_satellite_image_path(latest)),
-                "index_images": {name: f"/api/v1/public/satellite/{latest.id}/indices/{name}.png" for name in latest_visual_layers},
-                "visual_layers_available": len(latest_visual_layers),
-                "processing_credentials_configured": await copernicus_credentials_configured(db),
-                "plot_id": str(plot.id),
-            }
+
     date_to = target_date or datetime.now(UTC).date()
     date_from = target_date or (date_to - timedelta(days=runtime["lookback_days"]))
     geometry = plot_geometry(plot)
@@ -1324,81 +1871,153 @@ async def sync_satellite_for_station(
         geometry,
         date_from,
         date_to,
-        runtime["max_cloud_percentage"],
+        runtime["provider_tile_cloud_ceiling_percentage"],
         runtime["catalog_limit"],
     )
-    catalog = {
-        **catalog_result,
-        "plot_id": str(plot.id),
-        "geometry_mode": "polygon" if _polygon_geometry(plot.geojson) else "point_buffer_approximation",
-    }
-    if not catalog["features"]:
+    features = catalog_result["features"]
+    now = datetime.now(UTC)
+    if not features:
+        warning = "Copernicus no encontró escenas en el período configurado."
+        if latest_valid and not explicit_request:
+            raw = dict(latest_valid.raw_payload or {})
+            raw.update({
+                "catalog_checked_at": now.isoformat(),
+                "data_source_mode": "LAST_VALID_CACHE",
+                "fallback_used": True,
+                "data_warning": warning + " Se conserva el último NDVI válido almacenado.",
+                "candidate_checks": [],
+            })
+            latest_valid.raw_payload = raw
+            await db.commit()
+            await db.refresh(latest_valid)
+            return _cached_observation_result(
+                latest_valid,
+                plot,
+                credentials_ready=credentials_ready,
+                runtime=runtime,
+                warning=raw["data_warning"],
+            )
         return {
             "status": "NO_SCENE",
             "plot_id": str(plot.id),
             "count": 0,
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
+            "processing_credentials_configured": credentials_ready,
+            "data_warning": warning,
+            "runtime_config": runtime,
         }
-    feature = next((item for item in catalog["features"] if str(item.get("id")) == str(scene_id)), None) if scene_id else catalog["features"][0]
-    if scene_id and feature is None:
+
+    if scene_id and not any(str(item.get("id")) == str(scene_id) for item in features):
         raise ValueError("La escena seleccionada ya no está disponible en el catálogo para la geozona y fecha indicadas")
-    captured_at = _feature_datetime(feature)
+
+    selected_feature: dict[str, Any] | None
+    stats_result: dict[str, Any] | None
+    attempts: list[dict[str, Any]]
+    if credentials_ready:
+        selected_feature, stats_result, attempts = await _evaluate_catalog_candidates(
+            db,
+            plot,
+            features,
+            geometry,
+            integration,
+            runtime,
+            explicit_scene_id=scene_id,
+        )
+    else:
+        selected_feature = next((item for item in features if str(item.get("id")) == str(scene_id)), None) if scene_id else features[0]
+        stats_result = None
+        attempts = []
+
+    latest_catalog_feature = features[0]
+    latest_catalog_at = _feature_datetime(latest_catalog_feature)
+
+    if selected_feature is None:
+        warning = (
+            "Las escenas recientes no alcanzaron el mínimo de píxeles válidos dentro del polígono. "
+            "Se conserva el último NDVI válido almacenado."
+        )
+        if latest_valid and not explicit_request:
+            raw = dict(latest_valid.raw_payload or {})
+            raw.update({
+                "catalog_checked_at": now.isoformat(),
+                "latest_catalog_scene_at": latest_catalog_at.isoformat(),
+                "latest_catalog_scene_id": latest_catalog_feature.get("id"),
+                "data_source_mode": "LAST_VALID_CACHE",
+                "fallback_used": True,
+                "data_warning": warning,
+                "candidate_checks": attempts,
+            })
+            latest_valid.raw_payload = raw
+            await db.commit()
+            await db.refresh(latest_valid)
+            return _cached_observation_result(
+                latest_valid,
+                plot,
+                credentials_ready=credentials_ready,
+                runtime=runtime,
+                warning=warning,
+            )
+        return {
+            "status": "NO_VALID_SCENE",
+            "plot_id": str(plot.id),
+            "processing_credentials_configured": credentials_ready,
+            "data_warning": warning,
+            "latest_catalog_scene_at": latest_catalog_at.isoformat(),
+            "candidate_checks": attempts,
+            "runtime_config": runtime,
+        }
+
+    captured_at = _feature_datetime(selected_feature)
+    selected_scene_id = str(selected_feature.get("id") or "")
+    selected_rank = next(
+        (index for index, feature in enumerate(features, start=1) if str(feature.get("id")) == selected_scene_id),
+        1,
+    )
+    quality = dict((stats_result or {}).get("quality") or {})
+    accepted, acceptance_reason = _quality_acceptance(quality, runtime) if stats_result else (False, "OAuth no configurado")
+    fallback_used = selected_rank > 1
+    data_source_mode = "RECENT_VALID_FALLBACK" if fallback_used else "LATEST_VALID_SCENE"
+    data_warning = None
+    if fallback_used:
+        data_warning = (
+            f"La adquisición más reciente ({latest_catalog_at.date().isoformat()}) no tuvo suficiente superficie válida. "
+            f"Se muestra la escena válida más reciente del {captured_at.date().isoformat()}."
+        )
+    elif explicit_request and not accepted and credentials_ready:
+        data_warning = f"La escena seleccionada no cumple el umbral de calidad: {acceptance_reason}."
+
     existing = await db.scalar(
         select(SatelliteObservation).where(
             SatelliteObservation.plot_id == plot.id,
             SatelliteObservation.captured_at == captured_at,
         )
     )
-    existing_raw = (existing.raw_payload or {}) if existing else {}
-    existing_status = str(existing_raw.get("processing_status") or "") if existing else ""
-    existing_indices = existing_raw.get("indices") or {}
-    existing_has_indices = any(value is not None for value in existing_indices.values()) or bool(
-        existing and any(value is not None for value in (existing.ndvi, existing.ndmi, existing.ndwi))
-    )
-    existing_has_image = bool(existing and local_satellite_image_path(existing))
-    existing_index_paths = _local_index_paths(existing)
-    existing_has_visual_layers = len(existing_index_paths) == len(INDEX_NAMES)
-    existing_complete = (
-        existing_status == "PROCESSED"
-        and existing_has_indices
-        and existing_has_image
-        and existing_has_visual_layers
-    )
-    integration = await _integration(db)
-    client_id, client_secret = _oauth_credentials(integration)
-    credentials_ready = bool(client_id and client_secret)
-    # Una fila antigua marcada PROCESSED pero sin índices no está completa. Se
-    # conserva la imagen y se vuelve a ejecutar la fase estadística.
-    if existing and (existing_complete or not credentials_ready):
-        return {
-            "status": existing_status or "CURRENT",
-            "observation_id": str(existing.id),
-            "captured_at": existing.captured_at.isoformat(),
-            "cloud_percentage": existing.cloud_percentage,
-            "ndvi": existing.ndvi,
-            "ndmi": existing.ndmi,
-            "ndwi": existing.ndwi,
-            "indices": existing_indices,
-            "processing_error": existing_raw.get("processing_error"),
-            "image_available": existing_has_image,
-            "index_images": {name: f"/api/v1/public/satellite/{existing.id}/indices/{name}.png" for name in existing_index_paths},
-            "visual_layers_available": len(existing_index_paths),
-            "processing_credentials_configured": credentials_ready,
-            "plot_id": str(plot.id),
-        }
-
-    previous = await db.scalar(
-        select(SatelliteObservation)
-        .where(
-            SatelliteObservation.plot_id == plot.id,
-            SatelliteObservation.captured_at < captured_at,
+    existing_raw = dict(existing.raw_payload or {}) if existing else {}
+    if existing and satellite_observation_is_complete(existing) and accepted:
+        existing_raw.update({
+            "catalog_checked_at": now.isoformat(),
+            "latest_catalog_scene_at": latest_catalog_at.isoformat(),
+            "latest_catalog_scene_id": latest_catalog_feature.get("id"),
+            "selected_scene_rank": selected_rank,
+            "data_source_mode": data_source_mode,
+            "fallback_used": fallback_used,
+            "data_warning": data_warning,
+            "candidate_checks": attempts,
+            "quality": quality or _observation_quality(existing),
+        })
+        existing.raw_payload = existing_raw
+        await db.commit()
+        await db.refresh(existing)
+        return _cached_observation_result(
+            existing,
+            plot,
+            credentials_ready=credentials_ready,
+            runtime=runtime,
         )
-        .order_by(SatelliteObservation.captured_at.desc())
-        .limit(1)
-    )
 
-    preview_url = _feature_preview(feature)
+    previous = await _latest_complete_observation(db, plot.id, before=captured_at)
+    preview_url = _feature_preview(selected_feature)
     ndvi = existing.ndvi if existing else None
     ndmi = existing.ndmi if existing else None
     ndwi = existing.ndwi if existing else None
@@ -1410,21 +2029,34 @@ async def sync_satellite_for_station(
     local_index_image_paths: dict[str, str] = _local_index_paths(existing)
     processing_error: str | None = None
     observation_id = existing.id if existing else uuid4()
+    source_url = existing.source_url if existing and existing.source_url else (preview_url[:1000] if preview_url else None)
+
     if credentials_ready:
         start, end = _scene_time_range(captured_at)
         phase_errors: list[str] = []
         image_ready = bool(local_image_path and Path(str(local_image_path)).is_file())
-        statistics_ready = any(value is not None for value in indices.values())
         visual_layers_ready = len(local_index_image_paths) == len(INDEX_NAMES)
+        statistics_ready = False
 
-        source_url = existing.source_url if existing and existing.source_url else (preview_url[:1000] if preview_url else None)
+        if stats_result:
+            indices = dict(stats_result.get("indices") or {})
+            statistics = dict(stats_result.get("statistics") or {})
+            quality = dict(stats_result.get("quality") or {})
+            statistics_ready = accepted
+            if any(value is not None for value in indices.values()):
+                ndvi, ndmi, ndwi = indices.get("ndvi"), indices.get("ndmi"), indices.get("ndwi")
+            if not accepted:
+                phase_errors.append(f"Estadísticas: {acceptance_reason}")
+        else:
+            phase_errors.append("Estadísticas: no fue posible evaluar la escena")
+
         if not image_ready:
             try:
                 image = await _process_image(
                     geometry,
                     start,
                     end,
-                    runtime["max_cloud_percentage"],
+                    runtime["provider_tile_cloud_ceiling_percentage"],
                     integration,
                 )
                 local = settings.storage_path / "satellite" / f"{observation_id}.jpg"
@@ -1436,35 +2068,12 @@ async def sync_satellite_for_station(
             except Exception as exc:
                 message = str(exc)[:1000]
                 logger.warning("satellite_process_image_failed", error=message)
-                phase_errors.append(message)
-
-        if not statistics_ready:
-            try:
-                stats = await _index_statistics(
-                    geometry,
-                    start,
-                    end,
-                    runtime["max_cloud_percentage"],
-                    integration,
-                )
-                new_indices = stats["indices"]
-                new_statistics_ready = any(value is not None for value in new_indices.values())
-                if new_statistics_ready:
-                    ndvi, ndmi, ndwi = stats["ndvi"], stats["ndmi"], stats["ndwi"]
-                    indices = new_indices
-                    statistics = stats["statistics"]
-                    statistics_ready = True
-                else:
-                    phase_errors.append("Estadísticas: no se encontraron píxeles válidos")
-            except Exception as exc:
-                message = str(exc)[:1000]
-                logger.warning("satellite_statistics_failed", error=message)
-                phase_errors.append(f"Estadísticas: {message}")
+                phase_errors.append(f"Imagen RGB: {message}")
 
         if not visual_layers_ready:
             missing = set(INDEX_NAMES) - set(local_index_image_paths)
             images, visual_errors = await _process_index_images(
-                geometry, start, end, runtime["max_cloud_percentage"], integration, only=missing
+                geometry, start, end, runtime["provider_tile_cloud_ceiling_percentage"], integration, only=missing
             )
             layer_dir = settings.storage_path / "satellite" / str(observation_id)
             layer_dir.mkdir(parents=True, exist_ok=True)
@@ -1483,12 +2092,10 @@ async def sync_satellite_for_station(
         processing_error = " | ".join(phase_errors) or None
         if image_ready and statistics_ready and visual_layers_ready:
             processing_status = "PROCESSED"
-        elif image_ready or statistics_ready or local_index_image_paths:
+        elif image_ready or any(value is not None for value in indices.values()) or local_index_image_paths:
             processing_status = "PARTIAL"
         else:
             processing_status = "FAILED"
-    else:
-        source_url = preview_url[:1000] if preview_url else None
 
     comparison: dict[str, Any] = {}
     if previous:
@@ -1498,9 +2105,10 @@ async def sync_satellite_for_station(
             comparison["ndmi_delta"] = round(ndmi - previous.ndmi, 4)
         if ndwi is not None and previous.ndwi is not None:
             comparison["ndwi_delta"] = round(ndwi - previous.ndwi, 4)
+
     row = existing or SatelliteObservation(id=observation_id, plot_id=plot.id, captured_at=captured_at)
     row.provider = "COPERNICUS_DATA_SPACE_SENTINEL_2_L2A"
-    row.cloud_percentage = _feature_cloud(feature)
+    row.cloud_percentage = _feature_cloud(selected_feature)
     row.ndvi = ndvi
     row.ndmi = ndmi
     row.ndwi = ndwi
@@ -1509,9 +2117,10 @@ async def sync_satellite_for_station(
     row.source_url = source_url
     row.resolution_m = 10
     row.raw_payload = {
-        "scene_id": feature.get("id"),
-        "feature": feature,
-        "geometry_mode": catalog["geometry_mode"],
+        **existing_raw,
+        "scene_id": selected_feature.get("id"),
+        "feature": selected_feature,
+        "geometry_mode": "polygon" if _polygon_geometry(plot.geojson) else "point_buffer_approximation",
         "processing_status": processing_status,
         "processing_error": processing_error,
         "local_image_path": local_image_path,
@@ -1519,21 +2128,33 @@ async def sync_satellite_for_station(
         "preview_url": preview_url,
         "statistics": statistics,
         "indices": indices,
+        "quality": quality,
+        "statistics_grid": (stats_result or {}).get("statistics_grid") or {},
+        "statistics_time_range": (stats_result or {}).get("statistics_time_range") or {},
+        "catalog_checked_at": now.isoformat(),
+        "latest_catalog_scene_at": latest_catalog_at.isoformat(),
+        "latest_catalog_scene_id": latest_catalog_feature.get("id"),
+        "selected_scene_rank": selected_rank,
+        "data_source_mode": data_source_mode,
+        "fallback_used": fallback_used,
+        "data_warning": data_warning,
+        "candidate_checks": attempts,
         "scene_metadata": {
-            "id": feature.get("id"),
-            "collection": feature.get("collection"),
-            "datetime": (feature.get("properties") or {}).get("datetime"),
-            "platform": (feature.get("properties") or {}).get("platform"),
-            "constellation": (feature.get("properties") or {}).get("constellation"),
-            "instrument": (feature.get("properties") or {}).get("instruments"),
-            "cloud_cover": (feature.get("properties") or {}).get("eo:cloud_cover"),
-            "processing_level": (feature.get("properties") or {}).get("processing:level"),
+            "id": selected_feature.get("id"),
+            "collection": selected_feature.get("collection"),
+            "datetime": (selected_feature.get("properties") or {}).get("datetime"),
+            "platform": (selected_feature.get("properties") or {}).get("platform"),
+            "constellation": (selected_feature.get("properties") or {}).get("constellation"),
+            "instrument": (selected_feature.get("properties") or {}).get("instruments"),
+            "cloud_cover": (selected_feature.get("properties") or {}).get("eo:cloud_cover"),
+            "processing_level": (selected_feature.get("properties") or {}).get("processing:level"),
         },
     }
     if not existing:
         db.add(row)
     await db.commit()
     await db.refresh(row)
+
     analysis_integration = await _integration(db)
     analysis = build_satellite_analysis(
         row,
@@ -1541,24 +2162,14 @@ async def sync_satellite_for_station(
         previous=previous,
         config={**_integration_config(analysis_integration), **satellite_runtime_config(analysis_integration)},
     )
-    return {
-        "status": processing_status,
-        "observation_id": str(row.id),
-        "captured_at": row.captured_at.isoformat(),
-        "cloud_percentage": row.cloud_percentage,
-        "ndvi": row.ndvi,
-        "ndmi": row.ndmi,
-        "ndwi": row.ndwi,
-        "indices": (row.raw_payload or {}).get("indices") or {},
-        "processing_error": processing_error,
-        "image_available": bool(local_image_path),
-        "index_images": {name: f"/api/v1/public/satellite/{row.id}/indices/{name}.png" for name in local_index_image_paths},
-        "visual_layers_available": len(local_index_image_paths),
-        "processing_credentials_configured": credentials_ready,
-        "plot_id": str(plot.id),
-        "analysis": analysis,
-        "runtime_config": runtime,
-    }
+    result = _cached_observation_result(
+        row,
+        plot,
+        credentials_ready=credentials_ready,
+        runtime=runtime,
+    )
+    result["analysis"] = analysis
+    return result
 
 
 async def catalog_scenes_for_station(
@@ -1582,7 +2193,7 @@ async def catalog_scenes_for_station(
             "geometry": geometry,
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "max_cloud": runtime["max_cloud_percentage"],
+            "max_cloud": runtime["provider_tile_cloud_ceiling_percentage"],
             "limit": max(item_limit, runtime["catalog_limit"]),
         },
         sort_keys=True,
@@ -1600,7 +2211,7 @@ async def catalog_scenes_for_station(
                 geometry,
                 date_from,
                 date_to,
-                runtime["max_cloud_percentage"],
+                runtime["provider_tile_cloud_ceiling_percentage"],
                 max(item_limit, runtime["catalog_limit"]),
             )
             _catalog_scene_cache[cache_key] = {
@@ -1639,11 +2250,7 @@ async def test_copernicus_integration(
     db: AsyncSession,
     station_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Execute a real phase-by-phase Copernicus check for one station.
-
-    The test reads geometry directly from stations. It intentionally does not
-    depend on legacy plot rows, because those can be stale or malformed.
-    """
+    """Execute a real, phase-by-phase Copernicus test with valid-scene fallback."""
     station_query = select(Station).where(
         Station.active.is_(True),
         Station.deleted_at.is_(None),
@@ -1715,7 +2322,7 @@ async def test_copernicus_integration(
             geometry,
             today - timedelta(days=runtime["lookback_days"]),
             today,
-            runtime["max_cloud_percentage"],
+            runtime["provider_tile_cloud_ceiling_percentage"],
             runtime["catalog_limit"],
         )
         diagnostics["catalog"] = "COMPLETED"
@@ -1763,11 +2370,9 @@ async def test_copernicus_integration(
             "diagnostics": {**diagnostics, "catalog": "COMPLETED_NO_SCENE"},
         }
 
-    feature = catalog["features"][0]
-    captured_at = _feature_datetime(feature)
-    start, end = _scene_time_range(captured_at)
-
+    latest_feature = catalog["features"][0]
     if not (client_id and client_secret):
+        captured_at = _feature_datetime(latest_feature)
         return {
             "station_id": str(station.id),
             "station": station.name,
@@ -1775,7 +2380,7 @@ async def test_copernicus_integration(
             "processing_error": None,
             "image_available": False,
             "processing_credentials_configured": False,
-            "scene_id": feature.get("id"),
+            "scene_id": latest_feature.get("id"),
             "captured_at": captured_at.isoformat(),
             "diagnostics": diagnostics,
         }
@@ -1794,15 +2399,53 @@ async def test_copernicus_integration(
             "processing_error": message,
             "image_available": False,
             "processing_credentials_configured": True,
-            "scene_id": feature.get("id"),
-            "captured_at": captured_at.isoformat(),
+            "scene_id": latest_feature.get("id"),
+            "captured_at": _feature_datetime(latest_feature).isoformat(),
             "diagnostics": diagnostics,
         }
 
+    plot = await ensure_station_plot(db, station)
+    feature, stats_result, attempts = await _evaluate_catalog_candidates(
+        db,
+        plot,
+        catalog["features"],
+        geometry,
+        integration,
+        runtime,
+    )
+    diagnostics["candidate_checks"] = attempts
+    if feature is None or stats_result is None:
+        diagnostics["statistics"] = "NO_VALID_SCENE"
+        return {
+            "station_id": str(station.id),
+            "station": station.name,
+            "status": "PARTIAL",
+            "processing_error": "Ninguna escena reciente alcanzó el mínimo de píxeles y cobertura válidos dentro del polígono.",
+            "image_available": False,
+            "visual_layers_available": 0,
+            "processing_credentials_configured": True,
+            "scene_id": latest_feature.get("id"),
+            "captured_at": _feature_datetime(latest_feature).isoformat(),
+            "indices": {},
+            "diagnostics": diagnostics,
+        }
+
+    captured_at = _feature_datetime(feature)
+    selected_rank = next(
+        (index for index, item in enumerate(catalog["features"], start=1) if str(item.get("id")) == str(feature.get("id"))),
+        1,
+    )
+    diagnostics["statistics"] = str((stats_result.get("quality") or {}).get("status") or "COMPLETED")
+    diagnostics["quality"] = stats_result.get("quality") or {}
+    diagnostics["selected_scene_rank"] = selected_rank
+    diagnostics["latest_catalog_scene_at"] = _feature_datetime(latest_feature).isoformat()
+    diagnostics["fallback_used"] = selected_rank > 1
+
+    start, end = _scene_time_range(captured_at)
     image_available = False
     process_error: str | None = None
     try:
-        image = await _process_image(geometry, start, end, runtime["max_cloud_percentage"], integration)
+        image = await _process_image(geometry, start, end, runtime["provider_tile_cloud_ceiling_percentage"], integration)
         image_available = bool(image)
         diagnostics["process"] = "COMPLETED" if image_available else "NO_IMAGE"
     except Exception as exc:
@@ -1814,7 +2457,7 @@ async def test_copernicus_integration(
     visual_error: str | None = None
     try:
         visual_layers, visual_errors = await _process_index_images(
-            geometry, start, end, runtime["max_cloud_percentage"], integration
+            geometry, start, end, runtime["provider_tile_cloud_ceiling_percentage"], integration
         )
         visual_layers_available = len(visual_layers)
         diagnostics["visual_layers"] = "COMPLETED" if visual_layers_available == len(INDEX_NAMES) else "PARTIAL"
@@ -1827,21 +2470,9 @@ async def test_copernicus_integration(
         diagnostics["visual_layers"] = "FAILED"
         diagnostics["visual_layers_error"] = visual_error
 
-    stats_result: dict[str, Any] = {}
-    statistics_error: str | None = None
-    try:
-        stats_result = await _index_statistics(geometry, start, end, runtime["max_cloud_percentage"], integration)
-        has_indices = any(stats_result.get(name) is not None for name in INDEX_NAMES)
-        diagnostics["statistics"] = "COMPLETED" if has_indices else "NO_VALID_PIXELS"
-    except Exception as exc:
-        statistics_error = str(exc)[:1000]
-        diagnostics["statistics"] = "FAILED"
-        diagnostics["statistics_error"] = statistics_error
-
-    phase_errors = [item for item in (process_error, visual_error, statistics_error) if item]
+    phase_errors = [item for item in (process_error, visual_error) if item]
     completed = image_available and visual_layers_available == len(INDEX_NAMES) and diagnostics["statistics"] == "COMPLETED"
-    partial = image_available or visual_layers_available > 0 or diagnostics["statistics"] in {"COMPLETED", "NO_VALID_PIXELS"}
-    status = "PROCESSED" if completed else "PARTIAL" if partial else "FAILED"
+    status = "PROCESSED" if completed else "PARTIAL"
     return {
         "station_id": str(station.id),
         "station": station.name,
@@ -1853,6 +2484,8 @@ async def test_copernicus_integration(
         "scene_id": feature.get("id"),
         "captured_at": captured_at.isoformat(),
         "indices": stats_result.get("indices") or {},
+        "quality": stats_result.get("quality") or {},
+        "fallback_used": selected_rank > 1,
         "diagnostics": diagnostics,
     }
 

@@ -36,11 +36,14 @@ from app.services.serialization import model_dict
 from app.services.satellite_map import build_satellite_map_context, generate_satellite_map_agent
 from app.services.satellite import (
     INDEX_NAMES,
+    _integration,
     copernicus_credentials_configured,
     latest_satellite_observation,
     local_satellite_image_path,
     local_satellite_index_image_path,
+    satellite_catalog_cache_is_stale,
     satellite_observation_payload,
+    satellite_runtime_config,
     sync_satellite_for_station,
 )
 from app.services.source_refresh import refresh_station_source_if_needed
@@ -126,7 +129,10 @@ async def public_satellite_map_process(
             db,
             payload.station_id,
             crop_id=crop.id,
-            force=payload.force,
+            # Un usuario público no puede forzar llamadas repetidas al proveedor.
+            # Las solicitudes manuales de escena/fecha siguen procesándose porque
+            # sync_satellite_for_station las identifica como explícitas.
+            force=False,
             target_date=payload.captured_date,
             scene_id=payload.scene_id,
         )
@@ -619,10 +625,8 @@ async def dashboard(
         "refresh_result": None,
         "error": None,
     }
-    stale_satellite = (
-        observation is None
-        or observation.created_at < datetime.now(UTC) - timedelta(hours=max(1, settings.satellite_refresh_hours))
-    )
+    satellite_runtime = satellite_runtime_config(await _integration(db))
+    stale_satellite = satellite_catalog_cache_is_stale(observation, satellite_runtime)
     if satellite_status["configured"] and stale_satellite:
         try:
             satellite_status["refresh_result"] = await sync_satellite_for_station(
@@ -737,7 +741,9 @@ async def public_satellite_refresh(
             db,
             station.id,
             crop_id=crop.id,
-            force=payload.force,
+            # Protección de cuota y concurrencia: el público reutiliza la última
+            # verificación compartida dentro de refresh_hours.
+            force=False,
         )
         plot, observation = await latest_satellite_observation(db, station.id, crop.id)
         satellite = (
