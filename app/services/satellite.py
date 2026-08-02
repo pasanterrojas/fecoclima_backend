@@ -157,7 +157,7 @@ def station_geometry(station: Station) -> dict[str, Any]:
         if station.influence_geojson:
             raise ValueError(
                 "La estación tiene un GeoJSON inválido y tampoco cuenta con latitud y longitud de respaldo. "
-                "Vuelva a guardar el polígono desde /admin/estaciones."
+                "Vuelva a guardar el polígono desde /fecoclima-ia/admin/estaciones."
             )
         raise ValueError(
             "La estación no tiene zona de influencia. Dibuje un Polygon/MultiPolygon o configure latitud y longitud."
@@ -201,7 +201,7 @@ async def select_station_plot(
     """Select the managed station geozone and skip malformed legacy plots.
 
     Sentinel processing is station-centric: the polygon saved in
-    /admin/estaciones is authoritative. Crop plots are only a legacy fallback
+    /fecoclima-ia/admin/estaciones is authoritative. Crop plots are only a legacy fallback
     until a managed station geozone is created.
     """
     base = [

@@ -64,7 +64,7 @@ def normalize_alert_configuration(configuration: dict[str, Any] | None, total_co
 
     The historical application used 0-2 / 3-5 / 6. Those values remain the
     fallback, but every threshold, label and color can now be changed from the
-    published rule version in /admin/reglas.
+    published rule version in /fecoclima-ia/admin/reglas.
     """
 
     normalized = deepcopy(DEFAULT_ALERT_CONFIGURATION)

@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     refresh_token_days: int = 14
     cookie_secure: bool = False
     cookie_domain: str | None = None
+    # Ruta pública donde se monta la aplicación. En producción bajo un
+    # subdirectorio use, por ejemplo, /fecoclima-ia para aislar las cookies
+    # de otras aplicaciones alojadas en el mismo dominio.
+    cookie_path: str = "/"
+    access_cookie_name: str = "access_token"
+    refresh_cookie_name: str = "refresh_token"
+    csrf_cookie_name: str = "csrf_token"
     # NoDecode evita que pydantic-settings intente interpretar estas variables
     # como JSON antes de ejecutar el validador. Se admiten CSV y JSON.
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:3000"])
@@ -64,7 +71,7 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from: str = "no-reply@example.com"
     smtp_starttls: bool = True
-    frontend_base_url: str = "http://localhost:3000"
+    frontend_base_url: str = "http://localhost:3000/fecoclima-ia"
 
     storage_path: Path = Path("/data")
     max_upload_mb: int = 15
@@ -79,6 +86,32 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = 4
     job_lock_timeout_minutes: int = 30
     metrics_enabled: bool = True
+
+    @field_validator("access_cookie_name", "refresh_cookie_name", "csrf_cookie_name")
+    @classmethod
+    def validate_cookie_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(character.isspace() or character in "=;," for character in normalized):
+            raise ValueError("Los nombres de cookie deben ser identificadores HTTP válidos")
+        return normalized
+
+    @field_validator("cookie_path", mode="before")
+    @classmethod
+    def normalize_cookie_path(cls, value):
+        raw = str(value or "/").strip()
+        if raw == "/":
+            return "/"
+        normalized = "/" + raw.strip("/")
+        if any(character in normalized for character in ("?", "#", ";")):
+            raise ValueError("COOKIE_PATH debe ser una ruta URL válida sin query string ni fragmento")
+        return normalized
+
+    @property
+    def auth_cookie_path(self) -> str:
+        api_prefix = "/" + self.api_v1_prefix.strip("/")
+        if self.cookie_path == "/":
+            return f"{api_prefix}/auth"
+        return f"{self.cookie_path}{api_prefix}/auth"
 
     @field_validator("cors_origins", "trusted_hosts", mode="before")
     @classmethod
@@ -114,6 +147,8 @@ class Settings(BaseSettings):
             errors.append("JWT_SECRET debe tener al menos 64 caracteres y no ser el valor de ejemplo")
         if not self.cookie_secure:
             errors.append("COOKIE_SECURE debe ser true")
+        if len({self.access_cookie_name, self.refresh_cookie_name, self.csrf_cookie_name}) != 3:
+            errors.append("ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME y CSRF_COOKIE_NAME deben ser distintos")
         if "*" in self.cors_origins:
             errors.append("CORS_ORIGINS no puede contener *")
         if "cambiar" in self.database_url.lower() or "change" in self.database_url.lower():

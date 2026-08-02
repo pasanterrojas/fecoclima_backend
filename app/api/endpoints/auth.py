@@ -29,9 +29,9 @@ router = APIRouter(prefix="/auth", tags=["Autenticación"])
 
 def _set_auth_cookies(response: Response, user: User, role_code: str) -> None:
     common = {"secure": settings.cookie_secure, "samesite": "lax", "domain": settings.cookie_domain}
-    response.set_cookie("access_token", access_token(str(user.id), role_code, user.token_version), httponly=True, max_age=settings.access_token_minutes * 60, path="/", **common)
-    response.set_cookie("refresh_token", refresh_token(str(user.id), user.token_version), httponly=True, max_age=settings.refresh_token_days * 86400, path=f"{settings.api_v1_prefix}/auth", **common)
-    response.set_cookie("csrf_token", csrf_token(), httponly=False, max_age=settings.refresh_token_days * 86400, path="/", **common)
+    response.set_cookie(settings.access_cookie_name, access_token(str(user.id), role_code, user.token_version), httponly=True, max_age=settings.access_token_minutes * 60, path=settings.cookie_path, **common)
+    response.set_cookie(settings.refresh_cookie_name, refresh_token(str(user.id), user.token_version), httponly=True, max_age=settings.refresh_token_days * 86400, path=settings.auth_cookie_path, **common)
+    response.set_cookie(settings.csrf_cookie_name, csrf_token(), httponly=False, max_age=settings.refresh_token_days * 86400, path=settings.cookie_path, **common)
 
 
 async def _user_response(db: DbSession, user: User) -> dict:
@@ -76,7 +76,7 @@ async def me(user: CurrentUser, db: DbSession) -> dict:
 
 @router.post("/refresh")
 async def refresh(response: Response, request: Request, db: DbSession) -> dict:
-    token = request.cookies.get("refresh_token")
+    token = request.cookies.get(settings.refresh_cookie_name)
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token no disponible")
     try:
@@ -95,9 +95,9 @@ async def refresh(response: Response, request: Request, db: DbSession) -> dict:
 async def logout(response: Response, request: Request, db: DbSession, user: CurrentUser) -> dict:
     await write_audit(db, action="AUTH_LOGOUT", user=user, request=request, entity_type="user", entity_id=str(user.id))
     await db.commit()
-    response.delete_cookie("access_token", path="/", domain=settings.cookie_domain)
-    response.delete_cookie("refresh_token", path=f"{settings.api_v1_prefix}/auth", domain=settings.cookie_domain)
-    response.delete_cookie("csrf_token", path="/", domain=settings.cookie_domain)
+    response.delete_cookie(settings.access_cookie_name, path=settings.cookie_path, domain=settings.cookie_domain)
+    response.delete_cookie(settings.refresh_cookie_name, path=settings.auth_cookie_path, domain=settings.cookie_domain)
+    response.delete_cookie(settings.csrf_cookie_name, path=settings.cookie_path, domain=settings.cookie_domain)
     return {"ok": True}
 
 

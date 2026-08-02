@@ -4,10 +4,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Cookie, Depends, Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import decode_token
 from app.db.models import Role, User
 from app.db.session import get_db
@@ -17,8 +18,9 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 async def get_current_user(
     db: DbSession,
-    access_token: Annotated[str | None, Cookie()] = None,
+    request: Request,
 ) -> User:
+    access_token = request.cookies.get(settings.access_cookie_name)
     if not access_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no autenticada")
     try:
@@ -38,11 +40,11 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 async def require_csrf(
     request: Request,
-    csrf_token: Annotated[str | None, Cookie()] = None,
     x_csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
 ) -> None:
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return
+    csrf_token = request.cookies.get(settings.csrf_cookie_name)
     if not csrf_token or not x_csrf_token or csrf_token != x_csrf_token:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token CSRF inválido")
 
