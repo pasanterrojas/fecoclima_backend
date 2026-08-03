@@ -39,15 +39,16 @@ Política obligatoria para Copernicus:
 - Reduce el peso del análisis cuando la escena sea antigua, nubosa o la geozona sea aproximada.
 """.strip()
 
-RUNTIME_PROTOCOL_VERSION = "markdown-v3-response-policy"
+RUNTIME_PROTOCOL_VERSION = "markdown-v4-admin-structure"
 logger = structlog.get_logger(__name__)
 
 
 PURPOSE_QUESTIONS = {
     "CROP_ANALYSIS": (
-        "Entrega una recomendación práctica para el productor. Abre con el nivel de atención y la primera acción; "
-        "resume qué revisar hoy y menciona únicamente el evento próximo que pueda cambiar una decisión. Integra, "
-        "sin crear widgets ni apartados separados, los temas habilitados en la política de respuesta."
+        "Entrega una recomendación práctica para el productor sin cambiar el nivel determinístico. "
+        "Respeta primero los títulos, nombres de secciones, orden y temas definidos en el prompt del agente y en "
+        "las instrucciones editables del administrador. Si no existe una estructura específica, abre con el nivel "
+        "de atención y la primera acción, resume qué revisar hoy y menciona solo el evento próximo que cambie una decisión."
     ),
     "SATELLITE_ANALYSIS": (
         "Analiza exclusivamente el aporte de Copernicus a esta consulta. Describe los índices y tendencias, "

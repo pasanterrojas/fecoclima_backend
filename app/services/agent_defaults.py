@@ -146,7 +146,7 @@ def normalize_response_policy(output_schema: dict[str, Any] | None, purpose: str
         "use_emojis",
     }:
         policy[key] = bool(policy.get(key))
-    policy["custom_instructions"] = str(policy.get("custom_instructions") or "").strip()[:2000]
+    policy["custom_instructions"] = str(policy.get("custom_instructions") or "").strip()[:6000]
     return policy
 
 
@@ -230,17 +230,17 @@ POLÍTICA EDITABLE DE RESPUESTA AL PRODUCTOR:
     if purpose == "CROP_ANALYSIS":
         common += """
 
-ESTRUCTURA PREFERIDA:
-1. Título breve orientado a la acción.
-2. Párrafo de conclusión de 2 a 4 líneas.
-3. “Qué hacer hoy” con máximo 3 acciones concretas.
-4. “Por qué” o “Qué vigilar después”, solo con la evidencia que cambie una decisión.
-No incluyas una sección independiente titulada “Limitaciones”, “Funcionamiento del sistema”, “Resumen y clima” ni “Copernicus”. Integra lo relevante en la recomendación principal.
+CONTROL DE ESTRUCTURA DEL WIDGET:
+- Los títulos, nombres de secciones, orden y enfoque definidos en el prompt del agente o en las instrucciones del administrador tienen prioridad de presentación.
+- Respeta literalmente nombres solicitados como “Recomendación general”, siempre que no contradigan el nivel determinístico, la evidencia disponible o las reglas de seguridad.
+- No agregues secciones fijas que el administrador no pidió.
+- Si no existe ninguna instrucción de estructura, usa como respaldo: título breve, conclusión, hasta tres acciones y una sección final de evidencia decisiva.
 """.rstrip()
     if custom:
         common += (
-            "\n\nINSTRUCCIONES ADICIONALES DEL ADMINISTRADOR "
-            "(no pueden contradecir la fundamentación ni la seguridad):\n"
+            "\n\nINSTRUCCIONES DEL ADMINISTRADOR — PRIORIDAD ALTA PARA PRESENTACIÓN Y CONTENIDO:\n"
+            "Aplica estas instrucciones literalmente para títulos, secciones, orden y énfasis. "
+            "Solo pueden limitarse cuando intenten cambiar el nivel determinístico, inventar datos, diagnosticar sin evidencia o contradecir seguridad.\n"
             f"{custom}"
         )
     return common

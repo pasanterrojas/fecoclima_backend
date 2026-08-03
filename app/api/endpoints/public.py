@@ -53,6 +53,27 @@ from app.services.year_comparison import build_year_comparison
 router = APIRouter(tags=["Portal público"])
 
 
+def _dashboard_evaluation_for_window(
+    evaluations: list[AlertEvaluation],
+) -> tuple[AlertEvaluation | None, str]:
+    """Select the evaluation represented by the 72-hour alert card.
+
+    The dashboard headline is the worst level in the window. Its condition
+    details and the agent evaluation id must therefore come from that same
+    daily evaluation; mixing the latest day with the worst headline produced
+    combinations such as “Alerta grave” with a moderate explanation.
+    Evaluations arrive newest first, so ties keep the most recent occurrence.
+    """
+    maximum_code = maximum_level(
+        [{"level": evaluation.level} for evaluation in evaluations]
+    )
+    selected = next(
+        (evaluation for evaluation in evaluations if evaluation.level == maximum_code),
+        evaluations[0] if evaluations else None,
+    )
+    return selected, maximum_code
+
+
 @router.get("/public/stations")
 async def public_stations(db: DbSession) -> list[dict]:
     demo_first = case((Station.code == "DEMO-ASUNCION", 0), else_=1)
@@ -430,13 +451,14 @@ async def dashboard(
             )
         ).all()
     )
-    current_eval = evaluations[0] if evaluations else None
-    if current_eval:
+    latest_eval = evaluations[0] if evaluations else None
+    display_eval, maximum_code = _dashboard_evaluation_for_window(evaluations)
+    if display_eval:
         condition_rows = list(
             (
                 await db.scalars(
                     select(AlertConditionResult)
-                    .where(AlertConditionResult.alert_evaluation_id == current_eval.id)
+                    .where(AlertConditionResult.alert_evaluation_id == display_eval.id)
                     .order_by(AlertConditionResult.key)
                 )
             ).all()
@@ -452,39 +474,40 @@ async def dashboard(
             }
             for condition in condition_rows
         ]
-        active_rule = await db.get(CropRuleVersion, current_eval.rule_version_id) if current_eval.rule_version_id else None
+        active_rule = await db.get(CropRuleVersion, display_eval.rule_version_id) if display_eval.rule_version_id else None
         classification = classify_alert_level(
-            current_eval.conditions_met,
-            current_eval.conditions_total,
-            current_eval.completion_pct,
+            display_eval.conditions_met,
+            display_eval.conditions_total,
+            display_eval.completion_pct,
             active_rule.configuration if active_rule else None,
             missing_required=any(item["status"] == "missing" for item in conditions),
-        )
-        maximum_code = maximum_level(
-            [{"level": evaluation.level} for evaluation in evaluations]
         )
         maximum_settings = classification["configuration"]["levels"].get(
             maximum_code,
             classification["configuration"]["levels"]["DATOS_INSUFICIENTES"],
         )
         current_alert = {
-            "evaluation_id": str(current_eval.id),
-            "rule_version_id": str(current_eval.rule_version_id) if current_eval.rule_version_id else None,
+            # El agente recibe exactamente la evaluación que representa el
+            # encabezado “Peor nivel · últimas 72 horas”.
+            "evaluation_id": str(display_eval.id),
+            "rule_version_id": str(display_eval.rule_version_id) if display_eval.rule_version_id else None,
             "rule_version": active_rule.version if active_rule else None,
-            "current_level": current_eval.level,
+            "current_evaluation_id": str(latest_eval.id) if latest_eval else None,
+            "current_level": latest_eval.level if latest_eval else "DATOS_INSUFICIENTES",
             "level_label": classification["label"],
             "level_color": classification["color"],
             "maximum_level_72h": maximum_code,
             "maximum_level_label": maximum_settings.get("label", maximum_code.title()),
             "maximum_level_color": maximum_settings.get("color", "gray"),
-            "conditions_met": current_eval.conditions_met,
-            "conditions_total": current_eval.conditions_total,
-            "completion_percentage": current_eval.completion_pct,
-            "confidence": current_eval.confidence,
-            "evaluated_at": current_eval.evaluated_at.isoformat(),
+            "conditions_met": display_eval.conditions_met,
+            "conditions_total": display_eval.conditions_total,
+            "completion_percentage": display_eval.completion_pct,
+            "confidence": display_eval.confidence,
+            "evaluation_date": display_eval.evaluation_date.isoformat(),
+            "evaluated_at": display_eval.evaluated_at.isoformat(),
             "conditions": conditions,
-            "diseases": current_eval.diseases,
-            "simple_explanation": current_eval.explanation
+            "diseases": display_eval.diseases,
+            "simple_explanation": display_eval.explanation
             or "Resultado determinístico disponible.",
         }
     else:
@@ -492,6 +515,7 @@ async def dashboard(
             "evaluation_id": None,
             "rule_version_id": None,
             "rule_version": None,
+            "current_evaluation_id": None,
             "current_level": "DATOS_INSUFICIENTES",
             "level_label": "Datos insuficientes",
             "level_color": "gray",
@@ -502,6 +526,7 @@ async def dashboard(
             "conditions_total": 0,
             "completion_percentage": 0,
             "confidence": 0,
+            "evaluation_date": None,
             "evaluated_at": None,
             "conditions": [],
             "diseases": [],

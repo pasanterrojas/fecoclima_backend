@@ -142,7 +142,7 @@ class AgentPayload(BaseModel):
     response_show_technical_values: bool = False
     response_show_system_details: bool = False
     response_use_emojis: bool = True
-    response_custom_instructions: str | None = Field(default=None, max_length=2000)
+    response_custom_instructions: str | None = Field(default=None, max_length=6000)
     rag_collection: str | None = None
     active: bool = True
 
