@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, update
 
 from app.api.deps import AdminUser, DbSession
 from app.core.crypto import encrypt_secret, mask_secret
@@ -86,7 +86,7 @@ async def get_settings(db: DbSession, _: AdminUser) -> dict:
             await db.scalars(
                 select(Crop)
                 .where(Crop.active.is_(True), Crop.deleted_at.is_(None))
-                .order_by(Crop.name)
+                .order_by(case((Crop.code == "TRIGO", 0), else_=1), Crop.name)
             )
         ).all()
     )

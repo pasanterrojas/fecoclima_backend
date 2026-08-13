@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from app.api.deps import AdminUser, AnalystUser, DbSession
 from app.core.config import settings
@@ -55,7 +55,8 @@ def _response_policy_overrides(payload: AgentPayload) -> dict:
 
 @router.get("/crops")
 async def list_crops(db: DbSession, _: AnalystUser, limit: int = 100, offset: int = 0) -> dict:
-    rows = (await db.scalars(select(Crop).where(Crop.deleted_at.is_(None)).order_by(Crop.name).offset(offset).limit(min(limit, 250)))).all()
+    wheat_first = case((Crop.code == "TRIGO", 0), else_=1)
+    rows = (await db.scalars(select(Crop).where(Crop.deleted_at.is_(None)).order_by(wheat_first, Crop.name).offset(offset).limit(min(limit, 250)))).all()
     return {"items": [model_dict(row, exclude={"deleted_at"}) for row in rows]}
 
 

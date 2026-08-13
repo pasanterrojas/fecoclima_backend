@@ -1,31 +1,34 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import structlog
-
 from app.core.config import settings
 from app.db.models import (
+    AgentKnowledgeDocument,
     AIAgent,
     AIAgentRun,
     AIAgentVersion,
     AlertEvaluation,
     Crop,
-    AgentKnowledgeDocument,
     KnowledgeDocument,
     Station,
 )
-from app.services.ai import generate_markdown_response, grounded_fallback_markdown
-from app.services.analysis_context import build_complete_analysis_context
 from app.services.agent_defaults import normalize_response_policy, response_policy_prompt
+from app.services.ai import (
+    generate_markdown_response,
+    grounded_chat_fallback_markdown,
+    grounded_fallback_markdown,
+)
+from app.services.analysis_context import build_complete_analysis_context
 from app.services.rag import retrieve_chunks
 from app.services.satellite import latest_satellite_observation, local_satellite_image_path
 from app.services.year_comparison import build_year_comparison
@@ -94,6 +97,32 @@ PROTOCOLO DE SALIDA PRIORITARIO:
     presentation = response_policy_prompt(response_policy, purpose)
     return "\n\n".join(
         part for part in [system_prompt.strip(), grounding_protocol, extra, presentation, output_protocol] if part
+    ).strip()
+
+
+def _effective_chat_prompt(system_prompt: str) -> str:
+    """Keep the configured agronomic expertise but replace widget formatting."""
+    return "\n\n".join(
+        [
+            system_prompt.strip(),
+            """
+PROTOCOLO DE CONVERSACIÓN CONTEXTUAL — PRIORIDAD MÁXIMA:
+- Responde primero la pregunta más reciente del productor y continúa naturalmente el historial. No vuelvas a redactar el widget de recomendación ni repitas todo el análisis salvo que te lo pidan.
+- Conserva como contexto la consulta completa: estación, cultivo, fecha de siembra, periodo, lecturas, regla determinística, fenología, pronóstico, comparación anual, documentos recuperados y Copernicus.
+- Las instrucciones de títulos, secciones u orden pensadas para el widget “Recomendación para productores” no se aplican a este chat.
+- Si hay imágenes, describe por separado únicamente rasgos realmente visibles. Luego formula hipótesis prudentes y contrástalas con clima, etapa, reglas, documentos y satélite. Una imagen aislada no confirma enfermedad, plaga, deficiencia ni tratamiento.
+- Distingue siempre datos observados, cálculos, pronóstico, evidencia satelital, evidencia documental y observación visual. No inventes valores, síntomas, fechas, fuentes ni causalidad.
+- El nivel determinístico no puede cambiarse. Si faltan datos decisivos, dilo y realiza como máximo una pregunta concreta para avanzar.
+- No recomiendes principios activos, dosis ni aplicaciones a partir de una foto. Indica qué debe verificarse en campo o laboratorio y cuándo consultar a un profesional.
+""".strip(),
+            SATELLITE_CONTEXT_POLICY,
+            """
+FORMATO:
+- Devuelve solo Markdown claro y directo, normalmente entre 120 y 600 palabras.
+- Usa subtítulos o listas únicamente cuando faciliten la lectura; evita introducciones genéricas, JSON y detalles internos del sistema.
+- Cita el título y la página o sección de un documento recuperado cuando esa evidencia sostenga una afirmación importante.
+""".strip(),
+        ]
     ).strip()
 
 
@@ -477,6 +506,7 @@ async def chat_with_agent_for_alert(
     period: str = "72h",
     history: list[dict[str, str]] | None = None,
     image_data_url: str | None = None,
+    image_data_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     alert = await db.get(AlertEvaluation, alert_id)
     if not alert:
@@ -484,12 +514,28 @@ async def chat_with_agent_for_alert(
 
     base_context = await build_complete_analysis_context(db, alert.id, period=period)
     agent, version = await select_agent_version(db, alert.crop_id, "CROP_ANALYSIS")
-    response_policy = normalize_response_policy(
+    recommendation_policy = normalize_response_policy(
         version.output_schema if version else {},
         "CROP_ANALYSIS",
     )
-    base_context["agent_purpose"] = "CROP_ANALYSIS"
-    base_context = _apply_response_scope(base_context, response_policy)
+    # Chat always receives the complete query. Presentation switches that hide
+    # sections in the recommendation widget must not remove evidence here.
+    base_context["agent_purpose"] = "CROP_CHAT"
+    station = await db.get(Station, alert.station_id)
+    if station:
+        try:
+            base_context["year_comparison"] = await build_year_comparison(
+                db,
+                station,
+                period=period,
+                refresh_historical_if_missing=False,
+            )
+        except Exception as exc:
+            logger.warning("chat_year_comparison_failed", error=str(exc)[:1000])
+            base_context["year_comparison_status"] = {
+                "status": "FAILED",
+                "error": str(exc)[:1000],
+            }
     context, sources = await _context_with_rag(
         db,
         alert,
@@ -497,9 +543,25 @@ async def chat_with_agent_for_alert(
         extra_query=question,
         agent_id=agent.id if agent else None,
     )
-    if not response_policy.get("include_sources"):
-        context["display_sources"] = False
+    context["display_sources"] = True
     context["producer_question"] = question
+    context["conversation_instructions"] = {
+        "answer_latest_question_first": True,
+        "reuse_complete_query_context": True,
+        "do_not_repeat_recommendation_widget": True,
+    }
+
+    images: list[str] = []
+    if image_data_url:
+        images.append(image_data_url)
+    for value in image_data_urls or []:
+        if value and value not in images:
+            images.append(value)
+    images = images[:4]
+    chat_policy = {
+        "max_words": min(max(int(recommendation_policy.get("max_words") or 260), 600), 800),
+        "max_sections": 8,
+    }
 
     started = datetime.now(UTC)
     run = AIAgentRun(
@@ -512,7 +574,7 @@ async def chat_with_agent_for_alert(
             "question": question,
             "period": period,
             "history_messages": len(history or []),
-            "has_image": bool(image_data_url),
+            "image_count": len(images),
             "context": context,
         },
         sources=sources,
@@ -523,18 +585,17 @@ async def chat_with_agent_for_alert(
     await db.refresh(run)
 
     if not agent or not version:
-        markdown = grounded_fallback_markdown(
+        markdown = grounded_chat_fallback_markdown(
             context,
-            purpose="CROP_ANALYSIS",
             reason="agent_not_configured",
+            has_images=bool(images),
         )
-        if image_data_url:
-            markdown += "\n\n> La imagen adjunta no fue interpretada porque no existe un agente general activo. No se infirió contenido visual."
         run.output_payload = {
             "markdown": markdown,
             "model": None,
             "usage": {},
             "has_image": False,
+            "image_count": len(images),
         }
         run.error_message = "El cultivo no tiene un agente general/version activo"
         run.finished_at = datetime.now(UTC)
@@ -549,27 +610,30 @@ async def chat_with_agent_for_alert(
             "agent_code": "DETERMINISTIC_FALLBACK",
             "sources": sources,
             "has_image": False,
+            "image_count": len(images),
         }
 
     try:
-        token_ceiling = max(1400, int(response_policy["max_words"]) * 5)
+        token_ceiling = max(1800, int(chat_policy["max_words"]) * 5)
         result = await generate_markdown_response(
-            _effective_prompt(version.system_prompt, "CROP_ANALYSIS", response_policy),
+            _effective_chat_prompt(version.system_prompt),
             context,
             question,
             version.model,
             history=history,
-            image_data_url=image_data_url,
+            image_data_urls=images,
             temperature=version.temperature,
             max_tokens=min(max(version.max_tokens, 600), token_ceiling, 3000),
-            response_policy=response_policy,
+            response_policy=chat_policy,
         )
+        images_processed = bool(images) and not result.get("fallback")
         run.status = "FALLBACK" if result.get("fallback") else "COMPLETED"
         run.output_payload = {
             "markdown": result.get("markdown"),
             "model": result.get("model"),
             "usage": result.get("usage", {}),
-            "has_image": bool(image_data_url),
+            "has_image": images_processed,
+            "image_count": len(images),
         }
         run.finished_at = datetime.now(UTC)
         run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
@@ -580,16 +644,15 @@ async def chat_with_agent_for_alert(
             "agent_name": agent.name,
             "agent_code": agent.code,
             "sources": sources,
-            "has_image": bool(image_data_url),
+            "has_image": images_processed,
+            "image_count": len(images),
         }
     except Exception as exc:
-        markdown = grounded_fallback_markdown(
+        markdown = grounded_chat_fallback_markdown(
             context,
-            purpose="CROP_ANALYSIS",
             reason="provider_error",
+            has_images=bool(images),
         )
-        if image_data_url:
-            markdown += "\n\n> La imagen adjunta no pudo ser procesada por el proveedor IA. No se infirió contenido visual."
         run.status = "FALLBACK"
         run.error_message = str(exc)[:3000]
         run.output_payload = {
@@ -597,6 +660,7 @@ async def chat_with_agent_for_alert(
             "model": run.model,
             "usage": {},
             "has_image": False,
+            "image_count": len(images),
         }
         run.finished_at = datetime.now(UTC)
         run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
@@ -610,4 +674,5 @@ async def chat_with_agent_for_alert(
             "agent_code": agent.code,
             "sources": sources,
             "has_image": False,
+            "image_count": len(images),
         }

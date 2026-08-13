@@ -1649,12 +1649,7 @@ def build_satellite_analysis(
         limitations.append("Faltan índices procesados; el agente debe usar Copernicus solo como referencia visual o de catálogo.")
 
     summary_parts = [f"Escena de hace {age_days:.0f} días", f"confiabilidad {reliability}"]
-    if observation.ndvi is not None:
-        summary_parts.append(f"NDVI {observation.ndvi:.3f}")
-    if observation.ndmi is not None:
-        summary_parts.append(f"NDMI {observation.ndmi:.3f}")
-    if observation.ndwi is not None:
-        summary_parts.append(f"NDWI {observation.ndwi:.3f}")
+
 
     return {
         "summary": " · ".join(summary_parts),

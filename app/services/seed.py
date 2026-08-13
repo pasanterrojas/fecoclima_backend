@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.models import (
+    AgentKnowledgeDocument,
     AIAgent,
     AIAgentVersion,
-    AgentKnowledgeDocument,
     BaseCondition,
     Crop,
     CropRuleSet,
@@ -28,7 +28,7 @@ from app.db.models import (
     User,
     WeatherReading,
 )
-from app.services.agent_defaults import AI_OUTPUT_SCHEMA, AGENT_PURPOSES, default_agent_prompt
+from app.services.agent_defaults import AGENT_PURPOSES, AI_OUTPUT_SCHEMA, default_agent_prompt
 from app.services.weather import aggregate_range, evaluate_alert_for_day
 
 logger = structlog.get_logger(__name__)
@@ -297,6 +297,7 @@ async def seed_all(db: AsyncSession) -> None:
             integration_config={
                 "header_name": "clima-key",
                 "range_max_months": 6,
+                "soil_moisture_unit": "cb",
                 "coordinate_source": "locality_centroid_approximation",
                 "coordinate_note": "Actualizar con la coordenada exacta de la estación cuando esté disponible.",
             },
@@ -320,6 +321,7 @@ async def seed_all(db: AsyncSession) -> None:
         integration_config = dict(station.integration_config or {})
         integration_config.setdefault("header_name", "clima-key")
         integration_config.setdefault("range_max_months", 6)
+        integration_config.setdefault("soil_moisture_unit", "cb")
         integration_config.setdefault("coordinate_source", "locality_centroid_approximation")
         integration_config.setdefault("coordinate_note", "Actualizar con la coordenada exacta de la estación cuando esté disponible.")
         station.integration_config = integration_config

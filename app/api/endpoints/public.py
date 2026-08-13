@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
 import uuid
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.db.models import (
     AlertConditionResult,
     AlertEvaluation,
+    BaseCondition,
     Crop,
     CropRuleVersion,
     PhenologyStage,
@@ -32,8 +33,6 @@ from app.services.alert_engine import classify_alert_level, maximum_level
 from app.services.disease_forecast import build_forecast_risk
 from app.services.forecast import refresh_station_forecast
 from app.services.phenology import calculate_stage
-from app.services.serialization import model_dict
-from app.services.satellite_map import build_satellite_map_context, generate_satellite_map_agent
 from app.services.satellite import (
     INDEX_NAMES,
     _integration,
@@ -46,8 +45,15 @@ from app.services.satellite import (
     satellite_runtime_config,
     sync_satellite_for_station,
 )
+from app.services.satellite_map import build_satellite_map_context, generate_satellite_map_agent
+from app.services.serialization import model_dict
 from app.services.source_refresh import refresh_station_source_if_needed
-from app.services.weather import aggregate_range, evaluate_alert_for_day
+from app.services.weather import (
+    aggregate_range,
+    effective_soil_moisture_unit,
+    evaluate_alert_for_day,
+    summarize_readings_for_conditions,
+)
 from app.services.year_comparison import build_year_comparison
 
 router = APIRouter(tags=["Portal público"])
@@ -101,11 +107,12 @@ async def public_stations(db: DbSession) -> list[dict]:
 
 @router.get("/public/crops")
 async def public_crops(db: DbSession) -> list[dict]:
+    wheat_first = case((Crop.code == "TRIGO", 0), else_=1)
     crops = (
         await db.scalars(
             select(Crop)
             .where(Crop.active.is_(True), Crop.deleted_at.is_(None))
-            .order_by(Crop.name)
+            .order_by(wheat_first, Crop.name)
         )
     ).all()
     return [model_dict(item, exclude={"created_by", "deleted_at"}) for item in crops]
@@ -202,14 +209,22 @@ def _period_start(period: str) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
 
 
-def _metric(key: str, label: str, value, unit: str, source: str | None) -> dict:
+def _metric(
+    key: str,
+    label: str,
+    value,
+    unit: str,
+    source: str | None,
+    *,
+    interpretation: dict | None = None,
+) -> dict:
     origin_map = {
         "measured": "measured",
         "imported": "imported",
         "estimated": "estimated",
         "forecast": "forecast",
     }
-    return {
+    payload = {
         "key": key,
         "label": label,
         "value": None if value is None else round(float(value), 2),
@@ -220,6 +235,30 @@ def _metric(key: str, label: str, value, unit: str, source: str | None) -> dict:
             else "unavailable"
         ),
     }
+    if interpretation:
+        payload["interpretation"] = interpretation
+    return payload
+
+
+def _soil_moisture_presentation(station: Station) -> tuple[str, dict | None]:
+    unit = effective_soil_moisture_unit(station)
+    if unit == "cb":
+        return "cb", {
+            "title": "Interpretación de tensión de humedad",
+            "minimum": 0,
+            "maximum": 200,
+            "unit": "cb",
+            "ranges": [
+                {"from": 0, "to": 10, "label": "Suelo saturado", "description": "Habitual justo después de lluvia abundante o riego copioso.", "color": "#4aa8d8"},
+                {"from": 10, "to": 30, "label": "Capacidad de campo", "description": "Agua disponible en un rango favorable sin saturar las raíces.", "color": "#4fbd72"},
+                {"from": 30, "to": 60, "label": "Rango normal de riego", "description": "Momento habitual para valorar el inicio del riego según cultivo y suelo.", "color": "#f1c84b"},
+                {"from": 60, "to": 100, "label": "Suelo seco", "description": "Puede indicar estrés hídrico, salvo cultivos tolerantes o suelos muy arcillosos.", "color": "#ef9842"},
+                {"from": 100, "to": 200, "label": "Severamente seco", "description": "La extracción de agua es difícil y aumenta el riesgo de marchitez.", "color": "#d85a52"},
+            ],
+            "caution": "",
+            "source_url": "https://csrlaboratorio.es/laboratorio/aguas/aguas-de-riego/riego-vii-cuanto-y-cuando-tengo-que-regar/",
+        }
+    return "%", None
 
 
 async def _phenology(db: DbSession, crop_id, planting_date: date, on_date: date) -> dict:
@@ -381,6 +420,16 @@ async def dashboard(
             .order_by(WeatherReading.sampled_at)
         )
     ).all()
+    # Keep synchronization counts separate from the exact series used by the
+    # selected dashboard period. The upstream API is synchronized by local
+    # calendar dates, while the analysis itself is a rolling timestamp window.
+    source_sync.update(
+        analysis_period=period,
+        analysis_from=start.isoformat(),
+        analysis_to=period_end.isoformat(),
+        analysis_readings=len(readings),
+    )
+    period_condition_values = summarize_readings_for_conditions(list(readings), station)
 
     now = datetime.now(UTC)
     if not latest:
@@ -397,6 +446,7 @@ async def dashboard(
             else "offline"
         )
 
+    soil_unit, soil_interpretation = _soil_moisture_presentation(station)
     metrics = [] if not latest else [
         _metric("temperature", "Temperatura", latest.temperature_c, "°C", latest.source),
         _metric("feels_like", "Sensación térmica", latest.feels_like_c, "°C", latest.source),
@@ -413,8 +463,16 @@ async def dashboard(
         _metric("et", "Evapotranspiración", latest.evapotranspiration_mm, "mm", latest.source),
         _metric("uv", "Índice UV", latest.uv_index, "", latest.source),
         _metric("soil_temperature", "Temperatura del suelo", latest.soil_temperature_c, "°C", latest.source),
-        _metric("soil_moisture", "Humedad del suelo", latest.soil_moisture_pct, "%", latest.source),
         _metric("leaf_sensor", "Sensor de hoja", latest.leaf_sensor_value, "", latest.source),
+        _metric(
+            "soil_moisture",
+            "Humedad del suelo",
+            latest.soil_moisture_pct,
+            soil_unit,
+            latest.source,
+            interpretation=soil_interpretation,
+        ),
+        
     ]
     if not latest:
         metrics = [
@@ -431,7 +489,7 @@ async def dashboard(
                 ("et", "Evapotranspiración", "mm"),
                 ("uv", "Índice UV", ""),
                 ("soil_temperature", "Temperatura del suelo", "°C"),
-                ("soil_moisture", "Humedad del suelo", "%"),
+                ("soil_moisture", "Humedad del suelo", soil_unit),
                 ("leaf_sensor", "Sensor de hoja", ""),
             ]
         ]
@@ -454,6 +512,21 @@ async def dashboard(
     latest_eval = evaluations[0] if evaluations else None
     display_eval, maximum_code = _dashboard_evaluation_for_window(evaluations)
     if display_eval:
+        active_rule = await db.get(CropRuleVersion, display_eval.rule_version_id) if display_eval.rule_version_id else None
+        base_conditions = list(
+            (
+                await db.scalars(
+                    select(BaseCondition)
+                    .where(
+                        BaseCondition.rule_version_id == display_eval.rule_version_id,
+                        BaseCondition.active.is_(True),
+                    )
+                    .order_by(BaseCondition.order_index)
+                )
+            ).all()
+        ) if display_eval.rule_version_id else []
+        specs_by_id = {item.id: item for item in base_conditions}
+        specs_by_key = {item.key: item for item in base_conditions}
         condition_rows = list(
             (
                 await db.scalars(
@@ -463,18 +536,31 @@ async def dashboard(
                 )
             ).all()
         )
-        conditions = [
-            {
+        conditions = []
+        for condition in condition_rows:
+            spec = specs_by_id.get(condition.condition_id) or specs_by_key.get(condition.key)
+            conditions.append({
                 "key": condition.key,
                 "label": condition.label,
                 "status": condition.status,
                 "value": condition.observed_value,
                 "unit": condition.unit,
                 "explanation": condition.explanation,
-            }
-            for condition in condition_rows
-        ]
-        active_rule = await db.get(CropRuleVersion, display_eval.rule_version_id) if display_eval.rule_version_id else None
+                "variable": spec.variable if spec else None,
+                "operator": spec.operator if spec else None,
+                "threshold_min": spec.threshold_min if spec else None,
+                "threshold_max": spec.threshold_max if spec else None,
+                "threshold_value": spec.threshold_value if spec else None,
+                "period_value": period_condition_values.get(spec.variable) if spec else None,
+                "period_aggregation": (
+                    "sum" if spec and spec.variable in {
+                        "rain_sum_mm",
+                        "leaf_wetness_hours",
+                        "solar_sum_wm2_samples",
+                        "evapotranspiration_sum_mm",
+                    } else "mean"
+                ),
+            })
         classification = classify_alert_level(
             display_eval.conditions_met,
             display_eval.conditions_total,
@@ -549,6 +635,10 @@ async def dashboard(
         "La completitud de registros compara lecturas recibidas contra la frecuencia esperada hasta la hora actual.",
         "La completitud de variables indica cuántas de las seis condiciones pudieron evaluarse.",
     ]
+    if soil_unit == "cb":
+        quality_notes.append(
+            "humedadSuelo se presenta como tensión en centibares (cb) según la configuración de la estación; los umbrales de reglas deben conservar esa misma unidad."
+        )
     if leaf_config.get("mode") == "threshold" and leaf_config.get("wet_threshold") is not None:
         quality_notes.append(
             f"sensorHoja=0 es hoja seca válida; una muestra se cuenta como mojada desde {leaf_config['wet_threshold']} y se convierte a horas usando la frecuencia de la estación."

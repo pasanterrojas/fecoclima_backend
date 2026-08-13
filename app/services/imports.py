@@ -97,8 +97,9 @@ def suggest_mapping(columns) -> dict[str, str]:
         "evapotranspiration_mm": ["et", "evapotranspiracion", "evapotranspiración"],
         "uv_index": ["uv", "indice uv", "índice uv"],
         "soil_temperature_c": ["temp suelo", "temperatura suelo"],
-        "soil_moisture_pct": ["humedad suelo"],
         "leaf_sensor_value": ["sensor hoja", "mojado foliar"],
+        "soil_moisture_pct": ["humedad suelo"],
+        
     }
     normalized = {str(column).strip().lower(): str(column) for column in columns}
     result: dict[str, str] = {}

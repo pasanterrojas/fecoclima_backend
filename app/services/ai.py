@@ -348,6 +348,72 @@ def grounded_fallback_markdown(
     return "\n".join(lines).strip()
 
 
+def grounded_chat_fallback_markdown(
+    context: dict[str, Any],
+    *,
+    reason: str | None = None,
+    has_images: bool = False,
+) -> str:
+    """Answer a chat turn without reusing the recommendation-widget template."""
+    query = context.get("query") or {}
+    alert = context.get("deterministic_result") or {}
+    observed = context.get("observed_series_summary") or {}
+    variables = observed.get("variables") or {}
+    diseases = alert.get("diseases") or []
+    station = query.get("station") or "la estación seleccionada"
+    crop = query.get("crop") or "el cultivo"
+    period = query.get("period") or "el periodo seleccionado"
+
+    lines = ["## Respuesta con la evidencia disponible", ""]
+    lines.append(
+        f"Para **{crop}** en **{station}**, el contexto de **{period}** conserva un nivel "
+        f"**{alert.get('level') or 'sin datos suficientes'}**. Puedo relacionar su pregunta con "
+        "las lecturas, reglas, fenología y evidencia satelital guardadas, pero en este momento no "
+        "está disponible la interpretación conversacional completa."
+    )
+
+    evidence: list[str] = []
+    for key, label, statistic, unit in [
+        ("temperature_c", "Temperatura", "mean", "°C de promedio"),
+        ("humidity_pct", "Humedad relativa", "mean", "% de promedio"),
+        ("rain_mm", "Lluvia", "sum", "mm acumulados"),
+        ("soil_moisture_pct", "Humedad del suelo", "mean", "de promedio"),
+        ("leaf_sensor_value", "Sensor de hoja", "mean", "de promedio"),
+    ]:
+        value = (variables.get(key) or {}).get(statistic)
+        if value is not None:
+            evidence.append(f"- **{label}:** {value} {unit}.")
+    if evidence:
+        lines.extend(["", "### Datos que sí quedan vinculados a la consulta", *evidence[:5]])
+
+    disease_names = [str(item.get("name")) for item in diseases if isinstance(item, dict) and item.get("name")]
+    if disease_names:
+        lines.extend(
+            [
+                "",
+                "Las reglas publicadas señalan condiciones compatibles para vigilar **"
+                + ", ".join(disease_names[:4])
+                + "**; esto orienta la inspección, pero no identifica por sí solo la causa de una mancha.",
+            ]
+        )
+    if has_images:
+        lines.extend(
+            [
+                "",
+                "> Las imágenes quedaron asociadas a este turno, pero no se interpretaron porque el servicio visual no respondió. No se inventaron rasgos ni diagnósticos.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Registre en campo qué órgano está afectado, forma y color de la lesión, distribución en el lote y fecha de aparición. Esa evidencia permite contrastar las hipótesis en una nueva consulta.",
+        ]
+    )
+    if reason:
+        lines.append("\n_Esta es una respuesta de respaldo basada solamente en los datos estructurados guardados._")
+    return "\n".join(lines).strip()
+
+
 def _is_reasoning_model(model: str) -> bool:
     normalized = model.lower().strip()
     return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
@@ -597,9 +663,10 @@ def _markdown_chat_payload(
     image_data_url: str | None,
     temperature: float,
     max_tokens: int,
+    image_data_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    for item in (history or [])[-8:]:
+    for item in (history or [])[-12:]:
         role = item.get("role")
         content = str(item.get("content") or "").strip()
         if role in {"user", "assistant"} and content:
@@ -616,10 +683,23 @@ def _markdown_chat_payload(
         "pronóstico, estimaciones y limitaciones. No cambies el nivel de alerta "
         "determinístico ni diagnostiques una enfermedad solo por una fotografía."
     )
+    images: list[str] = []
     if image_data_url:
+        images.append(image_data_url)
+    for value in image_data_urls or []:
+        if value and value not in images:
+            images.append(value)
+
+    if images:
         user_content: Any = [
             {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
+            *[
+                {
+                    "type": "image_url",
+                    "image_url": {"url": value, "detail": "high"},
+                }
+                for value in images
+            ],
         ]
     else:
         user_content = prompt
@@ -777,16 +857,26 @@ async def generate_markdown_response(
     *,
     history: list[dict[str, str]] | None = None,
     image_data_url: str | None = None,
+    image_data_urls: list[str] | None = None,
     temperature: float = 0.2,
     max_tokens: int = 1600,
     response_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected_model = model or settings.ai_default_model
     if not settings.ai_base_url or not settings.ai_api_key or not selected_model:
-        fallback_markdown = grounded_fallback_markdown(
-            context,
-            purpose=str(context.get("agent_purpose") or "CROP_ANALYSIS"),
-            reason="provider_not_configured",
+        purpose = str(context.get("agent_purpose") or "CROP_ANALYSIS")
+        fallback_markdown = (
+            grounded_chat_fallback_markdown(
+                context,
+                reason="provider_not_configured",
+                has_images=bool(image_data_url or image_data_urls),
+            )
+            if purpose == "CROP_CHAT"
+            else grounded_fallback_markdown(
+                context,
+                purpose=purpose,
+                reason="provider_not_configured",
+            )
         )
         return {
             "markdown": _enforce_markdown_policy(fallback_markdown, response_policy),
@@ -802,6 +892,7 @@ async def generate_markdown_response(
         question=question,
         history=history,
         image_data_url=image_data_url,
+        image_data_urls=image_data_urls,
         temperature=temperature,
         max_tokens=max_tokens,
     )

@@ -56,6 +56,10 @@ async def refresh_station_source_if_needed(
         "received": 0,
         "created": 0,
         "updated": 0,
+        "sync_from": None,
+        "sync_to": None,
+        "sync_timezone": station.timezone or "America/Asuncion",
+        "received_definition": "unique_samples_returned_for_sync_window",
     }
 
     if not requested:
@@ -93,6 +97,15 @@ async def refresh_station_source_if_needed(
     timezone = ZoneInfo(station.timezone or "America/Asuncion")
     date_to = datetime.now(timezone).date()
     date_from = date_to - timedelta(days=max(1, settings.public_analysis_sync_lookback_days))
+    # FECOCLIMA accepts year/month blocks rather than timestamps. The adapter
+    # narrows that response to these local calendar dates and deduplicates by
+    # sampled_at. This window intentionally covers the exact rolling analysis
+    # window even when it starts part-way through the first calendar date.
+    result.update(
+        sync_from=date_from.isoformat(),
+        sync_to=date_to.isoformat(),
+        sync_timezone=str(timezone),
+    )
     result["attempted"] = True
     try:
         sync_result = await sync_fecoclima_station(db, station.id, date_from, date_to)

@@ -46,6 +46,39 @@ def test_markdown_image_payload_keeps_context_and_image_without_temperature_for_
     assert "MODERADA" in content[0]["text"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert content[1]["image_url"]["detail"] == "high"
+
+
+def test_markdown_payload_accepts_multiple_field_images() -> None:
+    from app.services.ai import _markdown_chat_payload
+
+    payload = _markdown_chat_payload(
+        model="gpt-4.1-mini",
+        system_prompt="Asistente de trigo",
+        context={"query": {"station": "Raul Peña", "period": "72h"}},
+        question="Compara las manchas",
+        history=[],
+        image_data_url=None,
+        image_data_urls=[
+            "data:image/jpeg;base64,/9j/",
+            "data:image/png;base64,iVBORw0KGgo=",
+        ],
+        temperature=0.2,
+        max_tokens=900,
+    )
+    content = payload["messages"][-1]["content"]
+    assert [item["type"] for item in content] == ["text", "image_url", "image_url"]
+    assert all(item["image_url"]["detail"] == "high" for item in content[1:])
+
+
+def test_contextual_chat_prompt_overrides_recommendation_widget_format() -> None:
+    from app.services.agent_runtime import _effective_chat_prompt
+
+    prompt = _effective_chat_prompt("Experto agronómico configurado")
+    assert "Experto agronómico configurado" in prompt
+    assert "No vuelvas a redactar el widget" in prompt
+    assert "pregunta más reciente" in prompt
+    assert "hasta 4" not in prompt
 
 
 def test_legacy_json_agent_response_is_converted_to_markdown() -> None:

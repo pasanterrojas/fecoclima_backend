@@ -13,7 +13,6 @@ from app.db.models import (
     AlertConditionResult,
     AlertEvaluation,
     BaseCondition,
-    Crop,
     CropRuleVersion,
     DiseaseRule,
     IntegrationLog,
@@ -25,13 +24,15 @@ from app.services.alert_engine import ConditionSpec, evaluate_daily_alert
 from app.services.fecoclima_adapter import FecoclimaAdapter
 from app.services.phenology import calculate_stage
 
-
 VALID_RANGES = {
     "temperature_c": (-60, 65),
     "humidity_pct": (0, 100),
     "rain_mm": (0, 1000),
     "soil_temperature_c": (-20, 80),
-    "soil_moisture_pct": (0, 100),
+    # The FECOCLIMA humedadSuelo channel may be configured as percentage or
+    # centibars. A shared 0..200 storage guard accepts both representations;
+    # interpretation and units are supplied by the station configuration.
+    "soil_moisture_pct": (0, 200),
     "leaf_sensor_value": (0, 100000),
     "wind_speed_ms": (0, 120),
     "pressure_hpa": (800, 1150),
@@ -122,6 +123,16 @@ async def sync_fecoclima_station(db: AsyncSession, station_id, date_from: date, 
 RAUL_PENA_GUID = "C2694D32-5A4B-48C0-A3B6-8345D9E4935B"
 
 
+def effective_soil_moisture_unit(station: Station) -> str:
+    configured = (station.integration_config or {}).get("soil_moisture_unit")
+    if not configured and (station.external_guid or "").upper() == RAUL_PENA_GUID:
+        # Compatibility for production databases created before the unit was
+        # persisted in station metadata.
+        configured = "cb"
+    normalized = str(configured or "%").strip().lower()
+    return "cb" if normalized in {"cb", "cbar", "centibar", "centibars", "centibares"} else "%"
+
+
 def effective_leaf_sensor_config(station: Station) -> dict:
     """Return validated station semantics for the raw leaf sensor.
 
@@ -160,6 +171,66 @@ def _leaf_wetness_hours(values: pd.Series, config: dict, expected_interval_minut
     if mode == "hours":
         return float(clean.mean())
     return None
+
+
+def summarize_readings_for_conditions(
+    readings: list[WeatherReading],
+    station: Station,
+) -> dict[str, float | None]:
+    """Aggregate the exact rolling dashboard window for visual comparisons.
+
+    Daily alert calculations remain unchanged. This helper exists so the
+    optional agent charts can compare the selected 24h/72h/7d/30d series with
+    the thresholds published in the active rule without parsing AI prose.
+    """
+    if not readings:
+        return {
+            "temperature_avg_c": None,
+            "humidity_avg_pct": None,
+            "rain_sum_mm": None,
+            "soil_temperature_avg_c": None,
+            "soil_moisture_avg_pct": None,
+            "leaf_wetness_hours": None,
+            "solar_sum_wm2_samples": None,
+            "evapotranspiration_sum_mm": None,
+        }
+
+    columns = [
+        "temperature_c",
+        "humidity_pct",
+        "rain_mm",
+        "soil_temperature_c",
+        "soil_moisture_pct",
+        "leaf_sensor_value",
+        "solar_wm2",
+        "evapotranspiration_mm",
+    ]
+    frame = pd.DataFrame(
+        [{column: getattr(row, column) for column in columns} for row in readings]
+    )
+
+    def mean(column: str) -> float | None:
+        value = pd.to_numeric(frame[column], errors="coerce").mean(skipna=True)
+        return None if pd.isna(value) else round(float(value), 3)
+
+    def total(column: str) -> float | None:
+        value = pd.to_numeric(frame[column], errors="coerce").sum(min_count=1)
+        return None if pd.isna(value) else round(float(value), 3)
+
+    return {
+        "temperature_avg_c": mean("temperature_c"),
+        "humidity_avg_pct": mean("humidity_pct"),
+        "rain_sum_mm": total("rain_mm"),
+        "soil_temperature_avg_c": mean("soil_temperature_c"),
+        "soil_moisture_avg_pct": mean("soil_moisture_pct"),
+        "leaf_wetness_hours": _leaf_wetness_hours(
+            frame.leaf_sensor_value,
+            effective_leaf_sensor_config(station),
+            station.expected_interval_minutes,
+        ),
+        "solar_sum_wm2_samples": total("solar_wm2"),
+        "evapotranspiration_sum_mm": total("evapotranspiration_mm"),
+    }
 
 
 async def aggregate_station_day(db: AsyncSession, station: Station, summary_date: date) -> WeatherDailySummary:

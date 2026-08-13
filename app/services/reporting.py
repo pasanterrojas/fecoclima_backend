@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import io
-from datetime import UTC, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from xml.sax.saxutils import escape
 
 import matplotlib.pyplot as plt
@@ -11,7 +13,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +38,135 @@ PRIMARY = colors.HexColor("#004481")
 SECONDARY = colors.HexColor("#3B8DC2")
 LIGHT = colors.HexColor("#EAF3F8")
 DARK_TEXT = colors.HexColor("#15334A")
+MUTED_TEXT = colors.HexColor("#567083")
+MONTHS_ES = ("ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sept.", "oct.", "nov.", "dic.")
+
+
+def _format_decimal(value: Any, *, suffix: str = "", digits: int = 1) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:.{digits}f}{suffix}"
+
+
+def _format_short_date(value: date) -> str:
+    return f"{value.day:02d} {MONTHS_ES[value.month - 1]} {value.year}"
+
+
+def _format_iso_date(value: Any) -> str:
+    try:
+        return _format_short_date(date.fromisoformat(str(value)[:10]))
+    except (TypeError, ValueError):
+        return str(value or "-")
+
+
+def _format_date_list(values: list[Any]) -> str:
+    dates: list[date] = []
+    for value in values:
+        try:
+            parsed = date.fromisoformat(str(value)[:10])
+        except (TypeError, ValueError):
+            continue
+        if parsed not in dates:
+            dates.append(parsed)
+    dates.sort()
+    if not dates:
+        return "-"
+    if all(current - previous == timedelta(days=1) for previous, current in zip(dates, dates[1:])):
+        if len(dates) == 1:
+            return _format_short_date(dates[0])
+        start, end = dates[0], dates[-1]
+        if start.month == end.month and start.year == end.year:
+            return f"{start.day:02d} al {end.day:02d} {MONTHS_ES[end.month - 1]} {end.year}"
+        return f"{_format_short_date(start)} al {_format_short_date(end)}"
+    return ", ".join(_format_short_date(item) for item in dates)
+
+
+def _inline_markdown(value: str) -> str:
+    text = escape(value.strip())
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"`([^`]+)`", r'<font name="Courier">\1</font>', text)
+    return text
+
+
+def _markdown_flowables(markdown: str, styles) -> list[Any]:
+    output: list[Any] = []
+    paragraph: list[str] = []
+
+    def flush() -> None:
+        if paragraph:
+            output.append(Paragraph(_inline_markdown(" ".join(paragraph)), styles["FCBody"]))
+            paragraph.clear()
+
+    for raw in str(markdown or "").splitlines():
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            flush()
+            output.append(Paragraph(_inline_markdown(heading.group(1)), styles["FCSubheading"]))
+            continue
+        bullet = re.match(r"^(?:[-*]|\d+\.)\s+(.+)$", line)
+        if bullet:
+            flush()
+            output.append(Paragraph(f"- {_inline_markdown(bullet.group(1))}", styles["FCBody"]))
+            continue
+        if line.startswith(">"):
+            flush()
+            output.append(Paragraph(_inline_markdown(line.lstrip("> ")), styles["FCSmall"]))
+            continue
+        paragraph.append(line)
+    flush()
+    return output
+
+
+def _table_cell(value: Any, style) -> Paragraph:
+    text = "-" if value is None or str(value).strip() == "" else str(value)
+    return Paragraph(escape(text), style)
+
+
+def _styled_table(
+    rows: list[list[Any]],
+    widths: list[float],
+    styles,
+    *,
+    header_color=PRIMARY,
+    first_column_bold: bool = False,
+    long: bool = False,
+):
+    wrapped: list[list[Paragraph]] = []
+    for row_index, row in enumerate(rows):
+        wrapped.append([
+            _table_cell(
+                value,
+                styles["FCTableHeader"] if row_index == 0 else (
+                    styles["FCTableLabel"] if first_column_bold and column_index == 0 else styles["FCTableCell"]
+                ),
+            )
+            for column_index, value in enumerate(row)
+        ])
+    table_class = LongTable if long else Table
+    table = table_class(wrapped, repeatRows=1, colWidths=widths, hAlign="LEFT")
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), header_color),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#C8D8E2")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+    if len(rows) > 1:
+        commands.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]))
+    table.setStyle(TableStyle(commands))
+    return table
 
 
 def _plot_daily(rows: list[WeatherDailySummary]) -> bytes | None:
@@ -47,11 +178,25 @@ def _plot_daily(rows: list[WeatherDailySummary]) -> bytes | None:
     rain = [row.rain_sum_mm for row in rows]
     fig = plt.figure(figsize=(9, 4.6))
     ax = fig.add_subplot(111)
-    ax.plot(dates, temperatures, marker="o", linewidth=1.5, label="Temperatura °C")
+    ax.plot(
+    dates,
+    temperatures,
+    color="#E67E22",
+    marker="o",
+    linewidth=1.5,
+    label="Temperatura °C",
+)
     ax.set_ylabel("Temperatura °C")
     ax.tick_params(axis="x", rotation=35)
     ax2 = ax.twinx()
-    ax2.plot(dates, humidity, marker=".", linewidth=1.2, label="Humedad %")
+    ax2.plot(
+    dates,
+    humidity,
+    color="#26834A",
+    marker=".",
+    linewidth=1.2,
+    label="Humedad %",
+)
     ax2.bar(dates, [value or 0 for value in rain], alpha=0.18, label="Lluvia mm")
     ax2.set_ylabel("Humedad % / lluvia mm")
     lines, labels = ax.get_legend_handles_labels()
@@ -97,7 +242,7 @@ def _page_header(canvas, document):
 
 
 def _paragraph_list(items: list[str], style) -> list[Paragraph]:
-    return [Paragraph(f"• {escape(str(item))}", style) for item in items if item]
+    return [Paragraph(f"- {escape(str(item))}", style) for item in (items or []) if str(item).strip()]
 
 
 async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
@@ -215,11 +360,16 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
             ),
         )
     output = settings.storage_path / "reports" / f"fecoclima-{report.id}.pdf"
+    output.parent.mkdir(parents=True, exist_ok=True)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="FCTitle", parent=styles["Title"], textColor=PRIMARY, fontSize=24, leading=28, alignment=TA_CENTER, spaceAfter=16))
-    styles.add(ParagraphStyle(name="FCHeading", parent=styles["Heading2"], textColor=PRIMARY, fontSize=15, leading=19, spaceBefore=12, spaceAfter=10))
+    styles.add(ParagraphStyle(name="FCHeading", parent=styles["Heading2"], textColor=PRIMARY, fontSize=15, leading=19, spaceBefore=12, spaceAfter=10, keepWithNext=True))
+    styles.add(ParagraphStyle(name="FCSubheading", parent=styles["Heading3"], textColor=PRIMARY, fontSize=11.5, leading=15, spaceBefore=8, spaceAfter=5, keepWithNext=True))
     styles.add(ParagraphStyle(name="FCBody", parent=styles["BodyText"], fontSize=9.5, leading=14, textColor=DARK_TEXT))
-    styles.add(ParagraphStyle(name="FCSmall", parent=styles["BodyText"], fontSize=8, leading=11, textColor=DARK_TEXT))
+    styles.add(ParagraphStyle(name="FCSmall", parent=styles["BodyText"], fontSize=8, leading=11, textColor=MUTED_TEXT))
+    styles.add(ParagraphStyle(name="FCTableHeader", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7.2, leading=9.3, textColor=colors.white, splitLongWords=True))
+    styles.add(ParagraphStyle(name="FCTableCell", parent=styles["BodyText"], fontSize=7.2, leading=9.5, textColor=DARK_TEXT, splitLongWords=True))
+    styles.add(ParagraphStyle(name="FCTableLabel", parent=styles["FCTableCell"], fontName="Helvetica-Bold", textColor=PRIMARY))
     doc = SimpleDocTemplate(
         str(output),
         pagesize=A4,
@@ -246,8 +396,12 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
         ["Generado", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")],
         ["Versión de regla", report.rule_version or "No disponible"],
     ]
-    table = Table(overview, colWidths=[4.3 * cm, 11 * cm])
-    table.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, -1), LIGHT), ("TEXTCOLOR", (0, 0), (0, -1), PRIMARY), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C8D8E2")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 8)]))
+    overview_wrapped = [
+        [_table_cell(label, styles["FCTableLabel"]), _table_cell(value, styles["FCTableCell"])]
+        for label, value in overview
+    ]
+    table = Table(overview_wrapped, colWidths=[4.3 * cm, 11 * cm], hAlign="LEFT")
+    table.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, -1), LIGHT), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C8D8E2")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 8)]))
     story += [table, Spacer(1, 0.7 * cm), Paragraph("Advertencia", styles["FCHeading"]), Paragraph("Este documento apoya el monitoreo. Cualquier aplicación fitosanitaria debe validarse con un profesional y cumplir el registro y la etiqueta vigente en Paraguay.", styles["FCBody"]), PageBreak()]
     total_days = (report.date_to - report.date_from).days + 1
     days_with_data = len([row for row in daily if row.records_count > 0])
@@ -276,26 +430,47 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
     for summary in daily:
         alert = alert_by_date.get(summary.summary_date)
         rows.append([
-            summary.summary_date.isoformat(),
-            "—" if summary.temperature_avg_c is None else f"{summary.temperature_avg_c:.1f}",
-            "—" if summary.humidity_avg_pct is None else f"{summary.humidity_avg_pct:.1f}",
-            "—" if summary.rain_sum_mm is None else f"{summary.rain_sum_mm:.1f}",
-            f"{summary.completeness_pct:.0f}%",
-            "—" if not alert else f"{alert.conditions_met}/{alert.conditions_total}",
+            _format_short_date(summary.summary_date),
+            _format_decimal(summary.temperature_avg_c),
+            _format_decimal(summary.humidity_avg_pct),
+            _format_decimal(summary.rain_sum_mm),
+            _format_decimal(summary.completeness_pct, suffix="%"),
+            "-" if not alert else f"{alert.conditions_met}/{alert.conditions_total}",
             "Sin evaluar" if not alert else alert.level,
-            "—" if not alert or not alert.stage_code else alert.stage_code,
-            "—" if not alert or not alert.diseases else ", ".join(item.get("name", "") for item in alert.diseases),
+            "-" if not alert or not alert.stage_code else alert.stage_code,
+            "-" if not alert or not alert.diseases else ", ".join(item.get("name", "") for item in alert.diseases),
         ])
-    daily_table = Table(rows, repeatRows=1, colWidths=[1.65 * cm, 1.2 * cm, 1.1 * cm, 1.25 * cm, 1.4 * cm, 1.4 * cm, 1.6 * cm, 1.25 * cm, 4.6 * cm])
-    daily_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), PRIMARY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 6.6), ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C8D8E2")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT])]))
-    story += [daily_table]
+    daily_table = _styled_table(
+        rows,
+        [1.7 * cm, 1.35 * cm, 1.2 * cm, 1.35 * cm, 1.5 * cm, 1.5 * cm, 1.65 * cm, 1.3 * cm, 5.7 * cm],
+        styles,
+        long=True,
+    )
+    if daily:
+        story.append(daily_table)
+    else:
+        story.append(Paragraph("No existen filas diarias para el periodo seleccionado.", styles["FCBody"]))
     story += [PageBreak(), Paragraph("Pronóstico disponible", styles["FCHeading"])]
     if forecasts:
         forecast_rows = [["Fecha", "Mín. °C", "Máx. °C", "Lluvia mm", "Prob. lluvia", "HR %", "Viento m/s", "Fuente"]]
         for item in forecasts:
-            forecast_rows.append([item.forecast_date.isoformat(), item.temperature_min_c, item.temperature_max_c, item.precipitation_mm, item.precipitation_probability_pct, item.humidity_pct, item.wind_speed_ms, item.provider])
-        forecast_table = Table(forecast_rows, repeatRows=1, colWidths=[2.1 * cm, 1.6 * cm, 1.6 * cm, 1.7 * cm, 1.9 * cm, 1.4 * cm, 1.8 * cm, 2.6 * cm])
-        forecast_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), SECONDARY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTSIZE", (0, 0), (-1, -1), 7), ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C8D8E2"))]))
+            forecast_rows.append([
+                _format_short_date(item.forecast_date),
+                _format_decimal(item.temperature_min_c),
+                _format_decimal(item.temperature_max_c),
+                _format_decimal(item.precipitation_mm),
+                _format_decimal(item.precipitation_probability_pct, suffix="%"),
+                _format_decimal(item.humidity_pct),
+                _format_decimal(item.wind_speed_ms),
+                item.provider,
+            ])
+        forecast_table = _styled_table(
+            forecast_rows,
+            [2.1 * cm, 1.7 * cm, 1.7 * cm, 1.7 * cm, 1.9 * cm, 1.5 * cm, 1.8 * cm, 4.5 * cm],
+            styles,
+            header_color=SECONDARY,
+            long=True,
+        )
         story += [forecast_table, Paragraph("Los datos pronosticados se muestran separados de las lecturas observadas.", styles["FCSmall"])]
     else:
         story += [Paragraph("No había pronóstico almacenado para la estación al generar el reporte.", styles["FCBody"])]
@@ -305,14 +480,17 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
         risk_rows = [["Fecha", "Etapa", "Condiciones", "Cobertura", "Nivel potencial"]]
         for item in projected_days:
             risk_rows.append([
-                item.get("date"),
-                item.get("stage_code") or "—",
+                _format_iso_date(item.get("date")),
+                item.get("stage_code") or "-",
                 f"{item.get('conditions_met', 0)} de {item.get('conditions_total', 0)}",
-                f"{item.get('coverage_pct', 0):.0f}%",
+                _format_decimal(item.get("coverage_pct", 0), suffix="%"),
                 item.get("potential_level"),
             ])
-        risk_table = Table(risk_rows, repeatRows=1, colWidths=[3.0*cm, 2.7*cm, 3.1*cm, 2.4*cm, 3.3*cm])
-        risk_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), PRIMARY), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("FONTSIZE", (0,0), (-1,-1), 7), ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#C8D8E2"))]))
+        risk_table = _styled_table(
+            risk_rows,
+            [3.1 * cm, 2.8 * cm, 3.4 * cm, 2.5 * cm, 4.9 * cm],
+            styles,
+        )
         story += [risk_table, Paragraph("El nivel es potencial y no sustituye la alerta oficial basada en observaciones completas.", styles["FCSmall"])]
     else:
         story += [Paragraph("No había pronóstico evaluable para calcular riesgo potencial.", styles["FCBody"])]
@@ -321,9 +499,18 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
     if projected:
         projection_rows = [["Enfermedad", "Riesgo potencial", "Fechas", "Fuente"]]
         for item in projected:
-            projection_rows.append([item.get("name"), item.get("risk"), ", ".join(item.get("dates", [])), item.get("source") or "Regla publicada"] )
-        projection_table = Table(projection_rows, repeatRows=1, colWidths=[4.2*cm, 2.4*cm, 4.5*cm, 5.1*cm])
-        projection_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), SECONDARY), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("FONTSIZE", (0,0), (-1,-1), 7), ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#C8D8E2")), ("VALIGN", (0,0), (-1,-1), "TOP")]))
+            projection_rows.append([
+                item.get("name"),
+                item.get("risk"),
+                _format_date_list(item.get("dates", [])),
+                item.get("source") or "Regla publicada",
+            ])
+        projection_table = _styled_table(
+            projection_rows,
+            [3.3 * cm, 2.2 * cm, 3.8 * cm, 7.4 * cm],
+            styles,
+            header_color=SECONDARY,
+        )
         story += [projection_table, Paragraph("Esta sección es una proyección no diagnóstica basada en variables pronosticadas y reglas publicadas.", styles["FCSmall"])]
     else:
         story += [Paragraph("No se identificaron coincidencias con reglas completamente evaluables.", styles["FCBody"])]
@@ -336,27 +523,59 @@ async def generate_report_pdf(db: AsyncSession, report_id) -> ReportFile:
         story += [Paragraph("Reglas no proyectadas por falta de variables", styles["FCHeading"]), *_paragraph_list(limitations, styles["FCSmall"])]
     story += [Paragraph("Información satelital", styles["FCHeading"])]
     if satellite:
-        story += [Paragraph(f"Observación más reciente: {satellite.captured_at.isoformat()} · proveedor {escape(satellite.provider)} · nubosidad {satellite.cloud_percentage if satellite.cloud_percentage is not None else 'sin dato'}% · NDVI {satellite.ndvi if satellite.ndvi is not None else 'sin dato'} · NDMI {satellite.ndmi if satellite.ndmi is not None else 'sin dato'}.", styles["FCBody"]), Paragraph("La observación satelital describe el estado de la superficie; no es una predicción meteorológica.", styles["FCSmall"])]
+        captured_at = satellite.captured_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        story += [
+            Paragraph(
+                f"Observación más reciente: {captured_at} · proveedor {escape(str(satellite.provider))} · "
+                f"nubosidad {_format_decimal(satellite.cloud_percentage, suffix='%')} · "
+                f"NDVI {_format_decimal(satellite.ndvi, digits=3)} · "
+                f"NDMI {_format_decimal(satellite.ndmi, digits=3)}.",
+                styles["FCBody"],
+            ),
+            Paragraph("La observación satelital describe el estado de la superficie; no es una predicción meteorológica.", styles["FCSmall"]),
+        ]
     else:
         story += [Paragraph("No existe una observación satelital asociada a una parcela geográfica de la estación.", styles["FCBody"])]
     story += [Paragraph("Recomendación del agente", styles["FCHeading"])]
     if recommendation:
-        story += [Paragraph(escape(recommendation.get("resumen", "")), styles["FCBody"]), Paragraph(escape(recommendation.get("explicacion_alerta", "")), styles["FCBody"])]
-        story += [Paragraph("Acciones recomendadas", styles["FCHeading"]), *_paragraph_list(recommendation.get("acciones_recomendadas", []), styles["FCBody"])]
-        story += [Paragraph("Variables a vigilar", styles["FCHeading"]), *_paragraph_list(recommendation.get("variables_a_vigilar", []), styles["FCBody"])]
-        story += [Paragraph("Limitaciones", styles["FCHeading"]), *_paragraph_list(recommendation.get("limitaciones", []), styles["FCBody"])]
-        sources = recommendation.get("fuentes", [])
-        story += [Paragraph("Fuentes documentales", styles["FCHeading"])]
-        if sources:
-            story += [Paragraph(f"• {escape(str(source.get('documento', 'Documento')))} — {escape(str(source.get('pagina_o_seccion', 'sin sección')))}", styles["FCBody"]) for source in sources]
+        recommendation_content: list[Any] = []
+        markdown = str(recommendation.get("markdown") or "").strip()
+        if markdown:
+            recommendation_content.extend(_markdown_flowables(markdown, styles))
         else:
-            story += [Paragraph("El agente no devolvió fuentes documentales para esta ejecución.", styles["FCBody"])]
+            for key in ("resumen", "explicacion_alerta"):
+                value = str(recommendation.get(key) or "").strip()
+                if value:
+                    recommendation_content.append(Paragraph(escape(value), styles["FCBody"]))
+            for title, key in (
+                ("Acciones recomendadas", "acciones_recomendadas"),
+                ("Variables a vigilar", "variables_a_vigilar"),
+                ("Limitaciones", "limitaciones"),
+            ):
+                items = _paragraph_list(recommendation.get(key, []), styles["FCBody"])
+                if items:
+                    recommendation_content.extend([Paragraph(title, styles["FCSubheading"]), *items])
+        if recommendation_content:
+            story.extend(recommendation_content)
+        else:
+            story.append(Paragraph("El agente no aportó texto adicional para esta ejecución. El análisis determinístico anterior permanece disponible.", styles["FCBody"]))
+
+        sources = recommendation.get("sources") or recommendation.get("fuentes") or []
+        if sources:
+            story.append(Paragraph("Fuentes documentales", styles["FCHeading"]))
+            for source in sources:
+                if isinstance(source, dict):
+                    document = source.get("documento") or source.get("document") or "Documento"
+                    section = source.get("pagina_o_seccion") or source.get("page_or_section") or "sin sección"
+                    story.append(Paragraph(f"- {escape(str(document))} - {escape(str(section))}", styles["FCBody"]))
+                elif str(source).strip():
+                    story.append(Paragraph(f"- {escape(str(source))}", styles["FCBody"]))
         status = recommendation.get("_agent_status")
         if status == "fallback":
             story += [Paragraph("La integración de IA no estaba configurada; se utilizó una explicación de respaldo basada únicamente en el resultado determinístico.", styles["FCSmall"])]
     else:
         story += [Paragraph("La explicación técnica del agente no estuvo disponible. El análisis determinístico anterior permanece válido.", styles["FCBody"])]
-    story += [PageBreak(), Paragraph("Metodología y limitaciones", styles["FCHeading"]), Paragraph("Las lecturas se normalizan, deduplican y agregan por día en la zona America/Asuncion. Se evalúan seis condiciones base. Con 0 a 2 condiciones el nivel es NINGUNA; con 3 a 5 es MODERADA; con 6 es GRAVE. Si falta una variable obligatoria, el resultado es DATOS_INSUFICIENTES salvo que exista una sustitución publicada y auditada.", styles["FCBody"]), Spacer(1, 0.3 * cm), Paragraph("Las reglas ambiguas de las fuentes, como ‘humedad elevada’ o ‘lluvias persistentes’, permanecen pendientes de validación técnica y no se convierten en umbrales inventados.", styles["FCBody"])]
+    story += [Paragraph("Metodología y limitaciones", styles["FCHeading"]), Paragraph("Las lecturas se normalizan, deduplican y agregan por día en la zona America/Asuncion. Se evalúan seis condiciones base. Con 0 a 2 condiciones el nivel es NINGUNA; con 3 a 5 es MODERADA; con 6 es GRAVE. Si falta una variable obligatoria, el resultado es DATOS_INSUFICIENTES salvo que exista una sustitución publicada y auditada.", styles["FCBody"]), Spacer(1, 0.3 * cm), Paragraph("Las reglas ambiguas de las fuentes, como ‘humedad elevada’ o ‘lluvias persistentes’, permanecen pendientes de validación técnica y no se convierten en umbrales inventados.", styles["FCBody"])]
     doc.build(story, onFirstPage=_page_header, onLaterPages=_page_header)
     content = output.read_bytes()
     file = ReportFile(report_id=report.id, filename=output.name, storage_path=str(output), size_bytes=len(content), checksum_sha256=hashlib.sha256(content).hexdigest())
