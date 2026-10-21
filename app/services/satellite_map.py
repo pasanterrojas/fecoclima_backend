@@ -23,7 +23,7 @@ from app.db.models import (
     WeatherReading,
 )
 from app.services.agent_runtime import select_agent_version
-from app.services.ai import generate_markdown_response
+from app.services.ai import generate_markdown_response, provider_fallback_reason
 from app.services.rag import retrieve_chunks
 from app.services.satellite import (
     CatalogTemporaryError,
@@ -651,6 +651,7 @@ async def generate_satellite_map_agent(
             image_data_url=image_data_url,
             temperature=version.temperature,
             max_tokens=min(version.max_tokens, 1800),
+            provider=getattr(version, "provider", "OPENAI"),
         )
         payload = {
             "markdown": _limit_satellite_markdown(
@@ -660,19 +661,21 @@ async def generate_satellite_map_agent(
             "sources": sources if policy.get("include_sources") else [],
             "model": result.get("model"),
             "fallback": bool(result.get("fallback")),
+            "reason": "provider_not_configured" if result.get("fallback") else None,
         }
         status = "FALLBACK" if payload["fallback"] else "COMPLETED"
         error_message = None
     except Exception as exc:
+        reason = provider_fallback_reason(exc)
         payload = {
             "markdown": _limit_satellite_markdown(fallback_markdown, policy),
             "sources": sources if policy.get("include_sources") else [],
             "model": None,
             "fallback": True,
-            "reason": "provider_error",
+            "reason": reason,
         }
         status = "FALLBACK"
-        error_message = str(exc)[:3000]
+        error_message = f"{reason} · HTTP {exc.status_code}" if hasattr(exc, "status_code") else reason
 
     finished = datetime.now(UTC)
     run = AIAgentRun(

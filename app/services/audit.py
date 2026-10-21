@@ -47,7 +47,7 @@ async def write_audit(
             entity_type=entity_type,
             entity_id=entity_id,
             ip_address=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent")[:500] if request else None,
+            user_agent=(request.headers.get("user-agent") or "")[:500] if request else None,
             before_data=_json_safe(before),
             after_data=_json_safe(after),
             extra_data=_json_safe(extra or {}),

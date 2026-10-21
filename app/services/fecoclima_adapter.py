@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from math import isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -44,17 +45,23 @@ def _number(value: Any) -> float | None:
     if value in (None, "", "null"):
         return None
     try:
-        return float(str(value).replace(",", "."))
+        numeric = float(str(value).replace(",", "."))
+        return numeric if isfinite(numeric) else None
     except (TypeError, ValueError):
         return None
 
 
-def _timestamp(value: Any) -> datetime | None:
+def _timestamp(value: Any, timezone: ZoneInfo = ASUNCION) -> datetime | None:
     if not value:
         return None
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        # Invalid optional extrema timestamps must not discard the entire
+        # measured sample. normalize_fecoclima_item still requires sampled_at.
+        return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ASUNCION)
+        parsed = parsed.replace(tzinfo=timezone)
     return parsed.astimezone(UTC)
 
 
@@ -127,8 +134,8 @@ def _interpret_curl_result(
     return items, degraded, status_code
 
 
-def normalize_fecoclima_item(item: dict[str, Any]) -> dict[str, Any]:
-    sampled_at = _timestamp(item.get("fechaMuestreo"))
+def normalize_fecoclima_item(item: dict[str, Any], *, timezone: ZoneInfo = ASUNCION) -> dict[str, Any]:
+    sampled_at = _timestamp(item.get("fechaMuestreo"), timezone)
     if sampled_at is None:
         raise ValueError("La respuesta no contiene fechaMuestreo válida")
     wind_dir = _number(item.get("windDir"))
@@ -152,8 +159,8 @@ def normalize_fecoclima_item(item: dict[str, Any]) -> dict[str, Any]:
         "uv_index": _number(item.get("uv")),
         "min_temperature_c": _number(item.get("minTemperatura")),
         "max_temperature_c": _number(item.get("maxTemperatura")),
-        "min_temperature_at": _timestamp(item.get("fechaMinTemp")),
-        "max_temperature_at": _timestamp(item.get("fechaMaxTemp")),
+        "min_temperature_at": _timestamp(item.get("fechaMinTemp"), timezone),
+        "max_temperature_at": _timestamp(item.get("fechaMaxTemp"), timezone),
         "soil_temperature_c": _number(item.get("temperaturaSuelo")),
         "soil_moisture_pct": _number(item.get("humedadSuelo")),
         "leaf_sensor_value": _number(item.get("sensorHoja")),
@@ -162,9 +169,10 @@ def normalize_fecoclima_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 class FecoclimaAdapter:
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None):
+    def __init__(self, *, base_url: str | None = None, api_key: str | None = None, endpoint_url: str | None = None):
         self.base_url = (base_url or settings.fecoclima_base_url).rstrip("/")
         self.api_key = api_key or settings.fecoclima_api_key
+        self.endpoint_url = endpoint_url
 
     async def _fetch_block_with_curl(self, url: str) -> list[dict[str, Any]]:
         """Compatibilidad con el servidor FECOCLIMA cuando devuelve headers HTTP no RFC.
@@ -236,6 +244,9 @@ class FecoclimaAdapter:
             f"{self.base_url}/estacion/lectura-guid-por-periodo/"
             f"{guid}/{block.year}/{block.month_from}/{block.month_to}"
         )
+        if self.endpoint_url:
+            url = self.endpoint_url.format(guid=guid, year=block.year,
+                                           month_from=block.month_from, month_to=block.month_to)
         headers = {"clima-key": self.api_key, "Accept": "application/json"}
         last_error: Exception | None = None
         attempts = max(1, settings.fecoclima_retry_count)
@@ -283,16 +294,17 @@ class FecoclimaAdapter:
             raise last_error
         return []
 
-    async def fetch_range(self, guid: str, date_from: date, date_to: date) -> list[dict[str, Any]]:
+    async def fetch_range(self, guid: str, date_from: date, date_to: date, *, timezone: str = "America/Asuncion") -> list[dict[str, Any]]:
+        local_tz = ZoneInfo(timezone)
         normalized: list[dict[str, Any]] = []
         for block in split_month_blocks(date_from, date_to):
             raw_items = await self.fetch_block(guid, block)
             for item in raw_items:
                 try:
-                    reading = normalize_fecoclima_item(item)
+                    reading = normalize_fecoclima_item(item, timezone=local_tz)
                 except (ValueError, TypeError):
                     continue
-                local_date = reading["sampled_at"].astimezone(ASUNCION).date()
+                local_date = reading["sampled_at"].astimezone(local_tz).date()
                 if date_from <= local_date <= date_to:
                     normalized.append(reading)
         deduplicated = {item["sampled_at"]: item for item in normalized}

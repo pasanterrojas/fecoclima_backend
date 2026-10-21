@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.crypto import decrypt_secret
-from app.db.models import Crop, IntegrationConfig, IntegrationLog, Station, TelegramSubscriber
+from app.db.models import Crop, EmailSubscription, IntegrationConfig, IntegrationLog, Station, TelegramSubscriber
 from app.services.agent_runtime import run_agent_for_alert
 from app.services.source_refresh import refresh_station_source_if_needed
 from app.services.weather import aggregate_range, evaluate_alert_for_day
@@ -328,6 +328,24 @@ async def process_telegram_update(
         )
     )
     command = _telegram_command(update)
+    message_data = _telegram_message(update)
+    message_text = str(message_data.get("text") or "").strip() if isinstance(message_data, dict) else ""
+    # Solo un enlace recibido después de confirmar correo permite vincular
+    # Telegram con el cultivo y estación de la libreta de direcciones.
+    linked_email_subscription = None
+    if command == "/start" and " " in message_text:
+        from app.services.notification_events import digest
+        from hmac import compare_digest
+        import re
+        match = re.fullmatch(r"fc_([a-f0-9]{32})_([a-f0-9]{24})", message_text.split(" ", 1)[1].strip())
+        if match and chat["chat_type"] == "private":
+            candidate = await db.get(EmailSubscription, UUID(hex=match.group(1)))
+            if candidate and candidate.status == "ACTIVE" and candidate.confirmed_at and compare_digest(
+                match.group(2), digest(f"tg:{candidate.id}:{candidate.manage_secret}")[:24]
+            ):
+                candidate.telegram_chat_id = chat["chat_id"]
+                candidate.telegram_active = True
+                linked_email_subscription = candidate
     membership = update.get("my_chat_member") if isinstance(update.get("my_chat_member"), dict) else None
     new_status = str(((membership or {}).get("new_chat_member") or {}).get("status") or "")
     now = datetime.now(UTC)
@@ -350,12 +368,16 @@ async def process_telegram_update(
         subscriber.last_error = None
         action = "SUBSCRIBED"
         response_text = (
+            ("✅ Telegram vinculado al cultivo y estación de su suscripción confirmada.\n" if linked_email_subscription else "") +
             "✅ Suscripción activada. FECOCLIMA IA enviará como máximo un boletín diario "
             f"cuando el nivel sea {subscriber.minimum_level.lower()} o superior.\n\n"
             "Use /status para consultar el estado o /stop para cancelar.\n"
             "La aplicación procesa las suscripciones automáticamente; no necesita compartir su Chat ID."
         )
     elif command in {"/stop", "/unsubscribe", "/salir"}:
+        linked = (await db.scalars(select(EmailSubscription).where(EmailSubscription.telegram_chat_id == chat["chat_id"]))).all()
+        for email_subscription in linked:
+            email_subscription.telegram_active = False
         if subscriber:
             subscriber.active = False
             subscriber.unsubscribed_at = now
@@ -369,6 +391,9 @@ async def process_telegram_update(
             + (f"Umbral: {subscriber.minimum_level}." if active and subscriber else "Use /start para suscribirse.")
         )
     elif new_status in {"kicked", "left"}:
+        linked = (await db.scalars(select(EmailSubscription).where(EmailSubscription.telegram_chat_id == chat["chat_id"]))).all()
+        for email_subscription in linked:
+            email_subscription.telegram_active = False
         if subscriber:
             subscriber.active = False
             subscriber.unsubscribed_at = now
@@ -540,6 +565,8 @@ async def _context_digest(
         )
         markdown = (recommendation or {}).get("markdown") or "No se pudo generar el criterio IA."
     return {
+        "station_id": str(station.id),
+        "crop_id": str(crop.id),
         "label": context.get("label") or f"{crop.name} · {station.name}",
         "station": station.name,
         "crop": crop.name,
@@ -654,32 +681,43 @@ async def generate_daily_digest(
         sent_channels: list[str] = []
         delivery_details: dict[str, Any] = {}
 
+        # El boletín antiguo ya no puede utilizar correos pegados en el CMS:
+        # solamente usuarios confirmados y con la misma estación/cultivo.
+        from app.services.notification_events import _message as _scoped_message, send_mail as _send_scoped_mail, manage_token, public_url
+        enabled_scopes = {(str(item['station_id']),str(item['crop_id'])) for item in sections}
+        address_book = list((await db.scalars(select(EmailSubscription).where(
+            EmailSubscription.status == 'ACTIVE', EmailSubscription.confirmed_at.is_not(None)
+        ))).all())
+        targets = [r for r in address_book if (str(r.station_id),str(r.crop_id)) in enabled_scopes]
         if config.get("email_enabled") and (only_channels is None or "email" in only_channels):
-            recipients = list(config.get("recipients") or [])
-            if not recipients:
-                raise RuntimeError("No hay destinatarios de correo configurados")
-            await _send_email(
-                recipients,
-                f"FECOCLIMA IA · Alerta {minimum_level.lower()} o superior · {now_local.strftime('%d/%m/%Y')}",
-                markdown,
-            )
+            email_sent=0
+            for recipient in targets:
+                local_sections = [item for item in sections if (str(item['station_id']),str(item['crop_id'])) == (str(recipient.station_id),str(recipient.crop_id))]
+                content = '\n\n'.join(f"{item['label']} · {item['level']}\n{_markdown_to_plain(item['markdown'])}" for item in local_sections)
+                await _send_scoped_mail(_scoped_message(
+                    recipient.email,
+                    f"FECOCLIMA IA · Alerta {minimum_level.lower()} · {now_local.strftime('%d/%m/%Y')}",
+                    'Boletín meteorológico para su cultivo', content,
+                    unsubscribe_url=public_url('?baja='+manage_token(recipient)),
+                ))
+                email_sent+=1
             sent_channels.append("email")
-            delivery_details["email"] = {"sent": len(recipients)}
+            delivery_details["email"]={"sent":email_sent,"origin":"confirmed_address_book"}
 
         if config.get("telegram_enabled") and (only_channels is None or "telegram" in only_channels):
             token = telegram_bot_token(integration)
             if not token:
                 raise RuntimeError("El token de Telegram no está configurado")
-            await sync_telegram_subscriptions(db, integration)
-            config = {**default_config(), **(integration.non_sensitive_config or {})}
-            telegram_result = await send_telegram_to_subscribers(
-                db,
-                integration,
-                token,
-                markdown,
-            )
+            telegram_sent=0
+            for recipient in targets:
+                if not recipient.telegram_active or not recipient.telegram_chat_id:
+                    continue
+                local_sections = [item for item in sections if (str(item['station_id']),str(item['crop_id'])) == (str(recipient.station_id),str(recipient.crop_id))]
+                content = '\n\n'.join(f"{item['label']} · {item['level']}\n{_markdown_to_plain(item['markdown'])}" for item in local_sections)
+                await _send_telegram(token, recipient.telegram_chat_id,content+'\n\nPara dejar de recibir Telegram envíe /stop.')
+                telegram_sent+=1
             sent_channels.append("telegram")
-            delivery_details["telegram"] = telegram_result
+            delivery_details["telegram"]={"sent":telegram_sent,"origin":"confirmed_address_book"}
 
         if not sent_channels:
             raise RuntimeError("No hay canales de envío activos")

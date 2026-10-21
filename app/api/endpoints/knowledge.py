@@ -16,10 +16,11 @@ from app.schemas.resources import KnowledgePayload
 from app.services.audit import write_audit
 from app.services.jobs import enqueue_job
 from app.services.serialization import model_dict
+from app.services.crop_knowledge import sync_crop_knowledge
 
 router = APIRouter(prefix="/knowledge", tags=["Base de conocimiento"])
-ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt"}
-ALLOWED_MIME = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "application/octet-stream"}
+ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
+ALLOWED_MIME = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/markdown", "text/x-markdown", "application/octet-stream"}
 
 
 def _safe_filename(name: str) -> str:
@@ -58,8 +59,11 @@ async def list_documents(
     limit: int = 100,
     offset: int = 0,
     agent_id: uuid.UUID | None = None,
+    crop_id: uuid.UUID | None = None,
 ) -> dict:
     query = select(KnowledgeDocument).where(KnowledgeDocument.deleted_at.is_(None))
+    if crop_id:
+        query = query.where(KnowledgeDocument.crop_id == crop_id)
     if agent_id:
         query = query.join(
             AgentKnowledgeDocument,
@@ -81,6 +85,7 @@ async def create_document(payload: KnowledgePayload, request: Request, db: DbSes
         raise HTTPException(status_code=422, detail="Ingrese texto de referencia o use /knowledge/upload para adjuntar un archivo")
     doc = KnowledgeDocument(**payload.model_dump(), index_status="PENDING", created_by=actor.id)
     db.add(doc); await db.flush()
+    if doc.crop_id: await sync_crop_knowledge(db, doc.crop_id)
     job = await enqueue_job(db, "RAG_INDEX", {"document_id": str(doc.id)}, priority=60, created_by=actor.id)
     await write_audit(db, action="KNOWLEDGE_CREATE", user=actor, request=request, entity_type="knowledge_document", entity_id=str(doc.id), after={"title": doc.title, "job_id": str(job.id)})
     await db.commit()
@@ -115,13 +120,21 @@ async def upload_document(
             detail="El cultivo del documento debe coincidir con el cultivo del agente",
         )
     parsed_crop_id = agent.crop_id if agent else parsed_crop_id_input
+    if parsed_crop_id:
+        crop = await db.get(Crop, parsed_crop_id)
+        if not crop or crop.deleted_at: raise HTTPException(status_code=422, detail="Cultivo no disponible")
     duplicate = await db.scalar(
         select(KnowledgeDocument).where(
             KnowledgeDocument.checksum_sha256 == checksum,
+            KnowledgeDocument.crop_id == parsed_crop_id,
             KnowledgeDocument.deleted_at.is_(None),
         )
     )
     if duplicate:
+        if parsed_crop_id and duplicate.crop_id == parsed_crop_id:
+            await sync_crop_knowledge(db, parsed_crop_id)
+            await db.commit()
+            return await _doc_dict(db, duplicate)
         if not agent:
             raise HTTPException(status_code=409, detail="Este archivo ya fue registrado")
         if duplicate.crop_id is not None and duplicate.crop_id != agent.crop_id:
@@ -140,10 +153,12 @@ async def upload_document(
             await db.commit()
         return await _doc_dict(db, duplicate)
     stored = settings.storage_path / "uploads" / f"{uuid.uuid4()}_{filename}"
+    stored.parent.mkdir(parents=True, exist_ok=True)
     stored.write_bytes(content)
     doc = KnowledgeDocument(title=title, crop_id=parsed_crop_id, institution=institution, year=year, version=version, filename=filename, mime_type=file.content_type, storage_path=str(stored), checksum_sha256=checksum, index_status="PENDING", active=True, created_by=actor.id)
     db.add(doc); await db.flush()
-    if agent:
+    if parsed_crop_id: await sync_crop_knowledge(db, parsed_crop_id)
+    if agent and not parsed_crop_id:
         db.add(AgentKnowledgeDocument(agent_id=agent.id, document_id=doc.id, created_by=actor.id))
     job = await enqueue_job(db, "RAG_INDEX", {"document_id": str(doc.id)}, priority=60, created_by=actor.id)
     await write_audit(db, action="KNOWLEDGE_UPLOAD", user=actor, request=request, entity_type="knowledge_document", entity_id=str(doc.id), after={"title": title, "filename": filename, "job_id": str(job.id)})
@@ -205,6 +220,7 @@ async def update_document(document_id: uuid.UUID, payload: KnowledgePayload, req
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     before = await _doc_dict(db, doc)
     for key, value in payload.model_dump().items(): setattr(doc, key, value)
+    if doc.crop_id: await sync_crop_knowledge(db, doc.crop_id)
     doc.index_status = "PENDING"
     await db.flush(); job = await enqueue_job(db, "RAG_INDEX", {"document_id": str(doc.id)}, priority=60, created_by=actor.id)
     after = await _doc_dict(db, doc)
@@ -236,3 +252,12 @@ async def delete_document(document_id: uuid.UUID, request: Request, db: DbSessio
     await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == doc.id))
     await write_audit(db, action="KNOWLEDGE_DELETE", user=actor, request=request, entity_type="knowledge_document", entity_id=str(doc.id))
     await db.commit(); return {"ok": True}
+
+
+@router.post("/crops/{crop_id}/sync")
+async def sync_crop_documents(crop_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    crop = await db.get(Crop, crop_id)
+    if not crop or crop.deleted_at: raise HTTPException(status_code=404, detail="Cultivo no encontrado")
+    count = await sync_crop_knowledge(db, crop_id)
+    await db.commit()
+    return {"documents_count": count, "status": "SYNCED"}

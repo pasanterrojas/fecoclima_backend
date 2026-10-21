@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     csrf_cookie_name: str = "csrf_token"
     # NoDecode evita que pydantic-settings intente interpretar estas variables
     # como JSON antes de ejecutar el validador. Se admiten CSV y JSON.
-    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:5173"])
     trusted_hosts: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["localhost", "127.0.0.1"])
     encryption_key: str | None = None
 
@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     fecoclima_retry_count: int = 3
 
     open_meteo_base_url: str = "https://api.open-meteo.com/v1"
+    station_geocoding_base_url: str = "https://nominatim.openstreetmap.org"
+    station_elevation_url: str = "https://api.open-meteo.com/v1/elevation"
     copernicus_stac_search_url: str = "https://stac.dataspace.copernicus.eu/v1/search"
     copernicus_client_id: str | None = None
     copernicus_client_secret: str | None = None
@@ -62,8 +64,13 @@ class Settings(BaseSettings):
     ai_chat_path: str = "/chat/completions"
     ai_embeddings_path: str = "/embeddings"
     ai_default_model: str | None = None
+    ai_transcription_model: str = "whisper-1"
     ai_embedding_model: str | None = None
     ai_embedding_dimensions: int = 1536
+    edge_ai_base_url: str | None = None
+    edge_ai_api_key: str | None = None
+    edge_ai_default_model: str = "gemma3"
+    edge_ai_supports_images: bool = False
 
     smtp_host: str | None = None
     smtp_port: int = 587

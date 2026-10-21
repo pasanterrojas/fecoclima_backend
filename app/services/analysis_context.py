@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,7 @@ from app.services.disease_forecast import build_forecast_risk
 from app.services.phenology import calculate_stage
 from app.services.serialization import model_dict
 from app.services.satellite import latest_satellite_observation, satellite_observation_payload
+from app.services.weather import effective_soil_moisture_unit
 
 _PERIOD_HOURS = {"24h": 24, "72h": 72, "7d": 168, "30d": 720}
 
@@ -134,7 +136,10 @@ async def build_complete_analysis_context(
         (
             await db.scalars(
                 select(PhenologyStage)
-                .where(PhenologyStage.crop_id == crop.id, PhenologyStage.active.is_(True))
+                .where(
+                    PhenologyStage.crop_id == crop.id, PhenologyStage.active.is_(True),
+                    PhenologyStage.deleted_at.is_(None), PhenologyStage.cycle_type == "normal",
+                )
                 .order_by(PhenologyStage.order_index)
             )
         ).all()
@@ -161,7 +166,7 @@ async def build_complete_analysis_context(
                 select(WeatherForecast)
                 .where(
                     WeatherForecast.station_id == station.id,
-                    WeatherForecast.forecast_date >= alert.evaluation_date,
+                    WeatherForecast.forecast_date >= datetime.now(ZoneInfo(station.timezone or "America/Asuncion")).date(),
                 )
                 .order_by(WeatherForecast.forecast_date)
                 .limit(7)
@@ -244,6 +249,7 @@ async def build_complete_analysis_context(
             "evaluation_date": alert.evaluation_date.isoformat(),
             "period": period,
         },
+        "sensor_units": {"soil_moisture_pct": effective_soil_moisture_unit(station)},
         "phenology": phenology,
         "deterministic_result": {
             "alert_id": str(alert.id),
@@ -313,6 +319,11 @@ async def build_complete_analysis_context(
             "grounding": (
                 "Usar exclusivamente los valores, reglas, cálculos, fragmentos documentales y fuentes incluidos "
                 "en este contexto. No completar datos ausentes ni atribuir causas no demostradas."
+            ),
+            "soil_units": (
+                "La columna histórica soil_moisture_pct puede guardar tensión del suelo. "
+                "Use sensor_units para interpretarla: cb significa tensión, % significa humedad porcentual. "
+                "No convierta ni equipare estas magnitudes; una unidad desconocida requiere validación del proveedor."
             ),
         },
         "context_generated_at": datetime.now(UTC).isoformat(),

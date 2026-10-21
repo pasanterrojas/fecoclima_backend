@@ -15,17 +15,24 @@ from app.api.endpoints import (
     knowledge,
     notifications,
     phenology,
+    parcels,
+    parcel_imagery,
+    public_parcels,
     public,
     reports,
     resources,
     rules,
     satellite,
+    subscriptions,
     stations,
     users,
 )
 
 api_router = APIRouter()
 for router in [
+    parcels.router,
+    public_parcels.router,
+    parcel_imagery.router,
     health.router,
     auth.router,
     public.router,
@@ -40,6 +47,7 @@ for router in [
     satellite.router,
     knowledge.router,
     notifications.router,
+    subscriptions.router,
     integrations.router,
     imports.router,
     exports.router,

@@ -23,6 +23,7 @@ from app.db.models import (
 from app.services.alert_engine import ConditionSpec, evaluate_daily_alert
 from app.services.fecoclima_adapter import FecoclimaAdapter
 from app.services.phenology import calculate_stage
+from app.services.soil_measurements import normalize_soil_unit, soil_rule_units, soil_rule_values
 
 VALID_RANGES = {
     "temperature_c": (-60, 65),
@@ -93,6 +94,8 @@ async def sync_fecoclima_station(db: AsyncSession, station_id, date_from: date, 
     station = await db.get(Station, station_id)
     if not station or not station.active:
         raise ValueError("Estación no disponible")
+    if station.source_type != "FECOCLIMA_API":
+        raise ValueError("La estación no usa API FECOCLIMA")
     if not station.external_guid:
         raise ValueError("La estación no tiene GUID externo")
     started = datetime.now(UTC)
@@ -100,7 +103,7 @@ async def sync_fecoclima_station(db: AsyncSession, station_id, date_from: date, 
     db.add(log)
     await db.commit()
     try:
-        readings = await FecoclimaAdapter().fetch_range(station.external_guid, date_from, date_to)
+        readings = await FecoclimaAdapter(endpoint_url=station.endpoint_url).fetch_range(station.external_guid, date_from, date_to, timezone=station.timezone or "America/Asuncion")
         created, updated = await upsert_readings(db, station.id, readings)
         station.last_synced_at = datetime.now(UTC)
         log.status = "COMPLETED"
@@ -124,13 +127,12 @@ RAUL_PENA_GUID = "C2694D32-5A4B-48C0-A3B6-8345D9E4935B"
 
 
 def effective_soil_moisture_unit(station: Station) -> str:
-    configured = (station.integration_config or {}).get("soil_moisture_unit")
+    configured = (getattr(station, "integration_config", None) or {}).get("soil_moisture_unit")
     if not configured and (station.external_guid or "").upper() == RAUL_PENA_GUID:
         # Compatibility for production databases created before the unit was
         # persisted in station metadata.
         configured = "cb"
-    normalized = str(configured or "%").strip().lower()
-    return "cb" if normalized in {"cb", "cbar", "centibar", "centibars", "centibares"} else "%"
+    return normalize_soil_unit(configured or "%")
 
 
 def effective_leaf_sensor_config(station: Station) -> dict:
@@ -173,6 +175,32 @@ def _leaf_wetness_hours(values: pd.Series, config: dict, expected_interval_minut
     return None
 
 
+def condition_readings_frame(readings: list[WeatherReading], station: Station) -> pd.DataFrame:
+    """Numeric usable samples; sensor units remain explicit, never converted implicitly."""
+    columns = [
+        "temperature_c",
+        "humidity_pct",
+        "rain_mm",
+        "soil_temperature_c",
+        "soil_moisture_pct",
+        "leaf_sensor_value",
+        "solar_wm2",
+        "evapotranspiration_mm",
+    ]
+    frame = pd.DataFrame(
+        [{column: getattr(row, column) for column in columns} for row in readings], columns=columns
+    )
+
+    for column in columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        bounds = VALID_RANGES.get(column)
+        if column == "soil_moisture_pct" and effective_soil_moisture_unit(station) == "%":
+            bounds = (0, 100)
+        if bounds:
+            frame[column] = frame[column].where(frame[column].between(*bounds))
+    return frame
+
+
 def summarize_readings_for_conditions(
     readings: list[WeatherReading],
     station: Station,
@@ -195,19 +223,7 @@ def summarize_readings_for_conditions(
             "evapotranspiration_sum_mm": None,
         }
 
-    columns = [
-        "temperature_c",
-        "humidity_pct",
-        "rain_mm",
-        "soil_temperature_c",
-        "soil_moisture_pct",
-        "leaf_sensor_value",
-        "solar_wm2",
-        "evapotranspiration_mm",
-    ]
-    frame = pd.DataFrame(
-        [{column: getattr(row, column) for column in columns} for row in readings]
-    )
+    frame = condition_readings_frame(readings, station)
 
     def mean(column: str) -> float | None:
         value = pd.to_numeric(frame[column], errors="coerce").mean(skipna=True)
@@ -247,7 +263,7 @@ async def aggregate_station_day(db: AsyncSession, station: Station, summary_date
     else:
         expected = max(1, round(24 * 60 / interval_minutes))
     if rows:
-        frame = pd.DataFrame([{c: getattr(row, c) for c in ["temperature_c", "humidity_pct", "rain_mm", "soil_temperature_c", "soil_moisture_pct", "leaf_sensor_value", "solar_wm2", "evapotranspiration_mm"]} for row in rows])
+        frame = condition_readings_frame(rows, station)
         values = {
             "temperature_avg_c": frame.temperature_c.mean(skipna=True),
             "humidity_avg_pct": frame.humidity_pct.mean(skipna=True),
@@ -320,6 +336,8 @@ async def _phenology_for_date(
                 .where(
                     PhenologyStage.crop_id == crop_id,
                     PhenologyStage.active.is_(True),
+                    PhenologyStage.deleted_at.is_(None),
+                    PhenologyStage.cycle_type == "normal",
                 )
                 .order_by(PhenologyStage.order_index)
             )
@@ -447,10 +465,10 @@ async def evaluate_alert_for_day(
             WeatherDailySummary.summary_date == summary_date,
         )
     )
+    station = await db.get(Station, station_id)
+    if not station:
+        raise ValueError("Estación no encontrada")
     if not summary:
-        station = await db.get(Station, station_id)
-        if not station:
-            raise ValueError("Estación no encontrada")
         summary = await aggregate_station_day(db, station, summary_date)
 
     conditions = list(
@@ -486,6 +504,7 @@ async def evaluate_alert_for_day(
             threshold_value=condition.threshold_value,
             unit=condition.unit,
             required=condition.required,
+            soil_alternative=condition.soil_alternative,
         )
         for condition in conditions
     ]
@@ -511,12 +530,13 @@ async def evaluate_alert_for_day(
         for disease in disease_rows
     ]
     result = evaluate_daily_alert(
-        values,
+        soil_rule_values(values, effective_soil_moisture_unit(station)),
         specs,
         stage_code=stage,
         disease_rules=disease_rules,
         data_completeness=summary.completeness_pct / 100,
         alert_configuration=rule.configuration,
+        observed_units=soil_rule_units(effective_soil_moisture_unit(station)),
     )
     existing = await db.scalar(
         select(AlertEvaluation).where(

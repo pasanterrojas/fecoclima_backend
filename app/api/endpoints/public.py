@@ -28,10 +28,18 @@ from app.schemas.actions import (
     PublicSatelliteMapProcessPayload,
     PublicSatelliteRefreshPayload,
 )
+from app.schemas.plots import ParcelCoveragePayload
 from app.schemas.resources import PhenologyCalculate
 from app.services.alert_engine import classify_alert_level, maximum_level
 from app.services.disease_forecast import build_forecast_risk
 from app.services.forecast import refresh_station_forecast
+from app.services.geospatial import (
+    calculate_influences,
+    coverage_percentage,
+    parcel_metrics,
+    station_footprint,
+    validate_polygon,
+)
 from app.services.phenology import calculate_stage
 from app.services.satellite import (
     INDEX_NAMES,
@@ -82,7 +90,9 @@ def _dashboard_evaluation_for_window(
 
 @router.get("/public/stations")
 async def public_stations(db: DbSession) -> list[dict]:
-    demo_first = case((Station.code == "DEMO-ASUNCION", 0), else_=1)
+    # Las estaciones de prueba nunca deben quedar preseleccionadas frente a
+    # estaciones reales agregadas desde el CMS.
+    demo_first = case((Station.code == "DEMO-ASUNCION", 1), else_=0)
     stations = (
         await db.scalars(
             select(Station)
@@ -91,18 +101,46 @@ async def public_stations(db: DbSession) -> list[dict]:
         )
     ).all()
     return [
-        model_dict(
-            item,
-            exclude={
-                "import_config",
-                "integration_config",
-                "leaf_sensor_config",
-                "created_by",
-                "deleted_at",
-            },
-        )
+        {
+            **model_dict(
+                item,
+                exclude={
+                    "import_config",
+                    "integration_config",
+                    "leaf_sensor_config",
+                    "created_by",
+                    "deleted_at",
+                },
+            ),
+            "influence_geojson": station_footprint(item),
+            "map_color": (item.integration_config or {}).get("map_color", "#277da1"),
+        }
         for item in stations
     ]
+
+
+@router.post("/public/parcel-coverage")
+async def public_parcel_coverage(payload: ParcelCoveragePayload, db: DbSession) -> dict:
+    """Preview station coverage for a drawn polygon before creating a parcel."""
+    try:
+        geometry = validate_polygon(payload.geojson)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    stations = list(
+        (
+            await db.scalars(
+                select(Station).where(Station.active.is_(True), Station.deleted_at.is_(None))
+            )
+        ).all()
+    )
+    influences = calculate_influences(geometry, stations)
+    coverage = coverage_percentage(geometry, influences)
+    return {
+        "coverage_pct": coverage,
+        "area_ha": parcel_metrics(geometry)["area_ha"],
+        "eligible": coverage >= 99,
+        "station_influences": influences,
+    }
 
 
 @router.get("/public/crops")
@@ -258,7 +296,7 @@ def _soil_moisture_presentation(station: Station) -> tuple[str, dict | None]:
             "caution": "",
             "source_url": "https://csrlaboratorio.es/laboratorio/aguas/aguas-de-riego/riego-vii-cuanto-y-cuando-tengo-que-regar/",
         }
-    return "%", None
+    return unit, None
 
 
 async def _phenology(db: DbSession, crop_id, planting_date: date, on_date: date) -> dict:
@@ -296,6 +334,10 @@ async def public_satellite_image(observation_id: uuid.UUID, db: DbSession):
     observation = await db.get(SatelliteObservation, observation_id)
     if not observation:
         raise HTTPException(status_code=404, detail="Imagen satelital no encontrada")
+    from app.db.models import Plot
+    source_plot = await db.get(Plot, observation.plot_id)
+    if not source_plot or source_plot.deleted_at or source_plot.planting_date is not None or source_plot.created_by is not None or source_plot.browser_session_id is not None:
+        raise HTTPException(status_code=404, detail="Imagen no disponible públicamente")
     path = local_satellite_image_path(observation)
     if not path:
         raise HTTPException(status_code=404, detail="La observación no tiene una imagen local procesada")
@@ -314,6 +356,10 @@ async def public_satellite_index_image(observation_id: uuid.UUID, index_name: st
     observation = await db.get(SatelliteObservation, observation_id)
     if not observation:
         raise HTTPException(status_code=404, detail="Observación satelital no encontrada")
+    from app.db.models import Plot
+    source_plot = await db.get(Plot, observation.plot_id)
+    if not source_plot or source_plot.deleted_at or source_plot.planting_date is not None or source_plot.created_by is not None or source_plot.browser_session_id is not None:
+        raise HTTPException(status_code=404, detail="Capa no disponible públicamente")
     path = local_satellite_index_image_path(observation, normalized)
     if not path:
         raise HTTPException(status_code=404, detail=f"La observación no tiene la capa {normalized.upper()} procesada")

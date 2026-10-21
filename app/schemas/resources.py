@@ -3,14 +3,16 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class StationPayload(BaseModel):
     name: str = Field(min_length=2, max_length=180)
-    code: str = Field(min_length=2, max_length=80)
+    code: str | None = Field(default=None, min_length=2, max_length=80)
     external_guid: str | None = None
+    endpoint_url: str | None = Field(default=None, max_length=1000)
     description: str | None = None
     country: str = "Paraguay"
     department: str | None = None
@@ -29,6 +31,75 @@ class StationPayload(BaseModel):
     influence_geojson: dict[str, Any] | str | None = None
     influence_radius_m: int | None = Field(default=750, ge=10, le=100000)
     active: bool = True
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def optional_station_code(cls, value):
+        if value is None:
+            return None
+        return str(value).strip().upper() or None
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint(cls, value):
+        if not value:
+            return None
+        # GUID extraction happens with the other fields in validate_source.
+        return value.strip()
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+            raise ValueError("Seleccione una zona horaria válida, por ejemplo America/Asuncion") from exc
+        return value
+
+    @field_validator("integration_config")
+    @classmethod
+    def validate_soil_sensor_configuration(cls, value: dict[str, Any]) -> dict[str, Any]:
+        from math import isfinite
+        from app.services.soil_measurements import normalize_soil_unit
+        config = dict(value)
+        if "map_color" in config:
+            import re
+            if not isinstance(config["map_color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", config["map_color"]):
+                raise ValueError("Seleccione un color de influencia hexadecimal válido (#RRGGBB)")
+            config["map_color"] = config["map_color"].lower()
+        if "soil_moisture_unit" in config:
+            unit = normalize_soil_unit(config["soil_moisture_unit"])
+            if unit not in {"%", "cb"}:
+                raise ValueError("Confirme la unidad del sensor de suelo: % o cb (centibares); cp no es una unidad reconocida")
+            config["soil_moisture_unit"] = unit
+        threshold = config.get("soil_tension_wet_max_cb")
+        if threshold is not None:
+            try:
+                numeric = float(threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("El umbral de tensión debe ser un número finito entre 0 y 200 cb") from exc
+            if isinstance(threshold, bool) or not isfinite(numeric) or not 0 <= numeric <= 200:
+                raise ValueError("El umbral de tensión debe estar entre 0 y 200 cb")
+            config["soil_tension_wet_max_cb"] = numeric
+        if config.get("soil_tension_rule_validated") is True and (
+            config.get("soil_moisture_unit") != "cb"
+            or config.get("soil_tension_proxy_enabled") is not True
+            or threshold is None
+            or not str(config.get("soil_tension_rule_reference") or "").strip()
+        ):
+            raise ValueError("Una alternativa de tensión validada requiere sensor cb, activación, umbral explícito y referencia técnica")
+        return config
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if self.endpoint_url:
+            from app.services.station_registration import normalize_station_endpoint
+            self.endpoint_url, self.external_guid = normalize_station_endpoint(self.endpoint_url, self.external_guid)
+        if self.source_type not in {"FECOCLIMA_API", "EXCEL", "CSV", "MANUAL"}:
+            raise ValueError("La fuente de la estación no está soportada")
+        if self.active and self.source_type == "FECOCLIMA_API" and not self.external_guid:
+            raise ValueError("Pegue la URL completa de la estación que incluye su GUID o complete el campo GUID externo proporcionado por FECOPROD")
+        return self
 
     @field_validator("influence_geojson", mode="before")
     @classmethod
@@ -51,10 +122,13 @@ class StationPayload(BaseModel):
 
 
 class PlotPayload(BaseModel):
-    name: str
-    producer_name: str | None = None
+    name: str = Field(min_length=2, max_length=180)
+    map_color: str = Field(default="#22a680", pattern=r"^#[0-9a-fA-F]{6}$")
+    producer_name: str | None = Field(default=None, max_length=180)
+    producer_document: str | None = Field(default=None, min_length=4, max_length=30, pattern=r"^[0-9A-Za-z.\- ]+$")
     crop_id: UUID | None = None
-    station_id: UUID
+    station_id: UUID | None = None
+    planting_date: date | None = None
     area_ha: float | None = Field(default=None, ge=0)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
@@ -62,13 +136,18 @@ class PlotPayload(BaseModel):
     influence_radius_m: int | None = Field(default=None, ge=10, le=100000)
     active: bool = True
 
+    @field_validator("map_color")
+    @classmethod
+    def normalize_map_color(cls, value: str) -> str:
+        return value.lower()
+
     @field_validator("geojson", mode="before")
     @classmethod
     def parse_geojson(cls, value):
-        if isinstance(value, str) and value.strip():
-            import json
-            return json.loads(value)
-        return value
+        if value in (None, ""):
+            return None
+        from app.services.geospatial import validate_polygon
+        return validate_polygon(value)
 
 
 class CropPayload(BaseModel):
@@ -76,6 +155,14 @@ class CropPayload(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str | None = None
     active: bool = True
+    planting_months: list[int] = Field(default_factory=list)
+
+    @field_validator("planting_months")
+    @classmethod
+    def validate_planting_months(cls, value: list[int]) -> list[int]:
+        if any(month < 1 or month > 12 for month in value):
+            raise ValueError("Seleccione meses entre enero y diciembre")
+        return sorted(set(value))
 
 
 class CropCyclePayload(BaseModel):
@@ -124,9 +211,12 @@ class AgentPayload(BaseModel):
     code: str
     crop_id: UUID | None = None
     purpose: str = "CROP_ANALYSIS"
+    allowed_widgets: list[str] = Field(default_factory=lambda: ["raw_data", "alerts", "phenology", "diagnosis", "satellite", "diseases", "forecast", "chat"])
     description: str | None = None
     system_prompt: str | None = None
     model: str | None = None
+    provider: str = "OPENAI"
+    html_template: str | None = Field(default=None, max_length=100000)
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=1400, ge=100, le=20000)
     output_schema: dict[str, Any] | str = Field(default_factory=dict)
@@ -166,10 +256,15 @@ class AgentPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_scope(self):
-        allowed = {"CROP_ANALYSIS", "SATELLITE_ANALYSIS", "PHENOLOGY_ANALYSIS", "YEAR_COMPARISON", "DAILY_DIGEST"}
+        from app.services.agent_defaults import AGENT_PURPOSES
+        allowed = set(AGENT_PURPOSES)
+        if not set(self.allowed_widgets) <= {"raw_data", "alerts", "phenology", "diagnosis", "satellite", "diseases", "forecast", "chat"}:
+            raise ValueError("Widgets permitidos no válidos")
+        if self.provider not in {"OPENAI", "EDGE"}:
+            raise ValueError("Proveedor debe ser OPENAI o EDGE")
         if self.purpose not in allowed:
             raise ValueError("Propósito de agente no soportado")
-        if self.purpose != "DAILY_DIGEST" and self.crop_id is None:
+        if self.purpose in {"RAG_CROP", "ALERT_ANALYSIS", "DISEASE_ANALYSIS", "PHENOLOGY_ANALYSIS", "CROP_ANALYSIS", "DAILY_DIGEST"} and self.crop_id is None:
             raise ValueError("Este propósito requiere seleccionar un cultivo")
         if self.response_detail_level not in {"BRIEF", "BALANCED", "DETAILED"}:
             raise ValueError("Nivel de detalle de respuesta no soportado")

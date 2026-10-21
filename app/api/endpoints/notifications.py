@@ -8,7 +8,7 @@ from sqlalchemy import case, delete, select, update
 
 from app.api.deps import AdminUser, DbSession
 from app.core.crypto import encrypt_secret, mask_secret
-from app.db.models import Crop, IntegrationConfig, IntegrationLog, Station, TelegramSubscriber
+from app.db.models import Crop, EmailSubscription, IntegrationConfig, IntegrationLog, Station, TelegramSubscriber
 from app.schemas.actions import ProducerNotificationSettingsPayload
 from app.services.audit import write_audit
 from app.services.jobs import enqueue_unique
@@ -115,7 +115,8 @@ async def update_settings(
     if payload.telegram_enabled and not new_token:
         raise HTTPException(status_code=409, detail="Guarde primero el token del bot de Telegram")
 
-    data = payload.model_dump(exclude={"telegram_bot_token"}, mode="json")
+    data = payload.model_dump(exclude={"telegram_bot_token", "recipients"}, mode="json")
+    data["recipients"] = []  # La lista administrada manualmente ya no es una fuente de envíos.
     data["last_delivery_date"] = previous.get("last_delivery_date")
     data["telegram_update_offset"] = previous.get("telegram_update_offset", 0)
     data["telegram_bot_username"] = previous.get("telegram_bot_username")
@@ -137,6 +138,7 @@ async def update_settings(
             await db.execute(
                 delete(TelegramSubscriber).where(TelegramSubscriber.integration_id == row.id)
             )
+            await db.execute(update(EmailSubscription).values(telegram_chat_id=None,telegram_active=False))
 
     row.non_sensitive_config = data
     row.active = payload.active
@@ -172,17 +174,15 @@ async def run_now(db: DbSession, _: AdminUser) -> dict:
 
 
 @router.post("/test-email")
-async def test_email(db: DbSession, _: AdminUser) -> dict:
-    row = await get_notification_integration(db)
-    if not row:
-        raise HTTPException(status_code=409, detail="Configure primero los avisos")
-    config = {**default_config(), **(row.non_sensitive_config or {})}
-    if not config.get("email_enabled"):
-        raise HTTPException(status_code=409, detail="Active el canal de correo")
+async def test_email(db: DbSession, actor: AdminUser) -> dict:
+    """Prueba SMTP SOLO al administrador; nunca envía pruebas masivas."""
+    from app.services.notification_events import _message, send_mail
     try:
-        return await generate_daily_digest(db, force=True, only_channels={"email"}, mark_delivered=False)
+        await send_mail(_message(actor.email,"Prueba FECOCLIMA IA", "Canal de correo funcionando",
+                                 "Esta prueba de conectividad fue solicitada desde el administrador. No se envió ningún mensaje a los productores."))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)[:3000]) from exc
+        raise HTTPException(status_code=502, detail=str(exc)[:700]) from exc
+    return {"ok":True,"sent":1,"recipient":actor.email}
 
 
 @router.post("/telegram/verify")
@@ -225,22 +225,17 @@ async def sync_telegram(db: DbSession, _: AdminUser) -> dict:
 
 @router.post("/test-telegram")
 async def test_telegram(db: DbSession, _: AdminUser) -> dict:
-    row = await get_notification_integration(db)
-    token = telegram_bot_token(row)
+    """Comprueba credencial y sincroniza; sin difusiones masivas de prueba."""
+    row=await get_notification_integration(db)
+    token=telegram_bot_token(row)
     if not row or not token:
-        raise HTTPException(status_code=409, detail="Guarde primero el token del bot de Telegram")
+        raise HTTPException(409,detail="Configure antes el bot de Telegram")
     try:
-        await sync_telegram_subscriptions(db, row)
-        result = await send_telegram_to_subscribers(
-            db,
-            row,
-            token,
-            "✅ FECOCLIMA IA: conexión correcta. Este chat quedó suscrito a las alertas automáticas.",
-        )
-        bot = (await telegram_request(token, "getMe")).get("result") or {}
+        bot=(await telegram_request(token,"getMe")).get("result") or {}
+        synced=await sync_telegram_subscriptions(db,row)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)[:3000]) from exc
-    return {"ok": True, "bot": bot.get("username"), "delivery": result}
+        raise HTTPException(status_code=502,detail=str(exc)[:700]) from exc
+    return {"ok":True,"bot":bot.get("username"),"processed":synced.get("processed",0),"message":"Bot verificado. No se enviaron mensajes a suscriptores."}
 
 
 @router.get("/telegram/subscribers")
@@ -258,6 +253,7 @@ async def deactivate_telegram_subscriber(subscriber_id: UUID, db: DbSession, _: 
         raise HTTPException(status_code=404, detail="Suscriptor no encontrado")
     row.active = False
     row.unsubscribed_at = datetime.now(UTC)
+    await db.execute(update(EmailSubscription).where(EmailSubscription.telegram_chat_id == row.chat_id).values(telegram_active=False))
     await db.commit()
     return {"ok": True}
 
@@ -278,6 +274,7 @@ async def reset_telegram(
             # The local reset must still work when the old token was revoked.
             pass
     await db.execute(delete(TelegramSubscriber).where(TelegramSubscriber.integration_id == row.id))
+    await db.execute(update(EmailSubscription).values(telegram_chat_id=None, telegram_active=False))
     config = {**default_config(), **(row.non_sensitive_config or {})}
     config.update(
         {

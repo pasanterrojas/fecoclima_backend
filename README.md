@@ -2,6 +2,12 @@
 
 Backend independiente y dockerizado para monitoreo agrometeorológico, fenología, alertas determinísticas, importación/sincronización de estaciones, pronósticos, información satelital, RAG, agentes de IA y reportes PDF.
 
+## Inteligencia por parcela
+
+El portal ahora parte del polígono, el cultivo y la fecha de siembra. Ofrece vistas Productor/Técnico, ventanas determinísticas de 72/96/120 horas, cobertura de varias estaciones, Sentinel-1/Sentinel-2, agentes OpenAI/Edge por widget, chat persistente con fotos, avisos y PDF con plantillas HTML.
+
+Consulte [la guía de arquitectura, configuración, API y migración](docs/PARCEL_INTELLIGENCE.md). Para activar esta versión se requieren la migración `0006_plot_intelligence`, el seed de agentes/roles y las nuevas dependencias del backend. La consulta anterior por estación se conserva en `/fecoclima-ia/clima`.
+
 ## Componentes
 
 - FastAPI y Python 3.12.
@@ -33,7 +39,7 @@ Edite `.env` y cambie como mínimo:
 - `ENCRYPTION_KEY`.
 - `SUPERADMIN_EMAIL` y `SUPERADMIN_PASSWORD`.
 - `PGADMIN_DEFAULT_PASSWORD`.
-- `FECOCLIMA_API_KEY` cuando vaya a sincronizar la estación Raul Peña.
+- `FECOCLIMA_API_KEY` cuando vaya a sincronizar estaciones de la API FECOCLIMA (no se envía al navegador).
 
 Levante los servicios:
 
@@ -106,12 +112,18 @@ El adaptador:
 
 - divide por año;
 - limita cada solicitud a seis meses;
-- normaliza fechas a `America/Asuncion`;
+- normaliza fechas según la zona horaria configurada para cada estación;
 - evita duplicados por estación y fecha de muestreo;
 - aplica timeout y reintentos;
 - registra el resultado en trabajos e integraciones.
 
 La estación inicial Raul Peña se carga con su GUID público. La llave `clima-key` no está incluida y debe configurarse en `.env`.
+
+Para agregar otra estación desde **Administración → Estaciones**, registre su nombre, código, coordenadas y zona horaria. Si usa `FECOCLIMA_API`, asigne su GUID externo propio (único) y pruebe la conexión en **Datos y sincronización**. Para `EXCEL` o `CSV`, importe archivos asignados a esa estación; para `MANUAL`, cargue los datos por el flujo administrativo. Ajuste las unidades de sensores en `integration_config` y `leaf_sensor_config` sin almacenar secretos allí. El portal muestra las estaciones activas y conserva las lecturas separadas por estación.
+
+## Disponibilidad de la IA
+
+Cada respuesta del agente expone un estado: `completed` si respondió el modelo o `fallback` si se usó un resumen basado en datos. El portal y **Administración → Panel administrativo** muestran esa diferencia sin exponer credenciales ni detalles privados del proveedor. Un HTTP 401 en las ejecuciones significa que el proveedor no autorizó la clave: reemplace `AI_API_KEY` en el entorno del backend y recree el contenedor `api` (y `worker`/`scheduler` si también consumen IA). Compruebe después el modelo en **Administración → Agentes IA**. Los datos meteorológicos y las alertas siguen disponibles sin IA. El botón **Explicar** consulta al agente solo cuando el productor lo solicita y utiliza exclusivamente los datos de esa consulta; también identifica claramente las respuestas de respaldo.
 
 ## Estructura
 

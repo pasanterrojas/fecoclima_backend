@@ -32,7 +32,7 @@ def extract_file_text(content: bytes, mime_type: str, filename: str) -> list[tup
     if mime_type in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"} or suffix == ".docx":
         doc = DocxDocument(BytesIO(content))
         return [("\n".join(paragraph.text for paragraph in doc.paragraphs), "documento")]
-    if mime_type.startswith("text/") or suffix == ".txt":
+    if mime_type.startswith("text/") or suffix in {".txt", ".md"}:
         return [(content.decode("utf-8", errors="replace"), "texto")]
     raise ValueError("Tipo de archivo no admitido")
 
@@ -117,16 +117,15 @@ def _base_query(crop_id=None, agent_id=None):
 
 async def _scoped_query(db: AsyncSession, *, crop_id=None, agent_id=None):
     base = _base_query(crop_id, agent_id)
+    if crop_id:
+        base = base.where(or_(KnowledgeChunk.crop_id == crop_id, KnowledgeChunk.crop_id.is_(None)))
     if agent_id:
-        # Agent knowledge is an explicit allow-list. Migration 0004 links all
-        # pre-existing crop documents, so a newly created agent with no links
-        # must not inherit documents assigned to another agent of the crop.
+        # Crop documents are inherited dynamically. Explicit links also retain
+        # compatible global references from previous versions.
         linked_ids = select(AgentKnowledgeDocument.document_id).where(
             AgentKnowledgeDocument.agent_id == agent_id
         )
-        base = base.where(KnowledgeDocument.id.in_(linked_ids))
-    elif crop_id:
-        base = base.where(or_(KnowledgeChunk.crop_id == crop_id, KnowledgeChunk.crop_id.is_(None)))
+        base = base.where(or_(KnowledgeDocument.id.in_(linked_ids), KnowledgeDocument.crop_id == crop_id) if crop_id else KnowledgeDocument.id.in_(linked_ids))
     return base
 
 
@@ -137,13 +136,14 @@ async def retrieve_chunks(
     limit: int = 6,
     *,
     agent_id=None,
+    allow_embedding: bool = True,
 ) -> list[dict]:
     """Retrieve agent-scoped evidence with vector search and lexical fallback.
 
     Neither an embedding outage nor chunks indexed without vectors may prevent
     the crop agent from answering with weather/rules and available documents.
     """
-    embedding = await _safe_embedding(query)
+    embedding = await _safe_embedding(query) if allow_embedding else None
     rows = []
     if embedding:
         vector_query = await _scoped_query(db, crop_id=crop_id, agent_id=agent_id)

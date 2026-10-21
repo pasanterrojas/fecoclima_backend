@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.agent_defaults import DEFAULT_PARCEL_PURPOSES
 
 import math
 from datetime import UTC, date, datetime, timedelta
@@ -34,6 +35,7 @@ from app.services.weather import aggregate_range, evaluate_alert_for_day
 logger = structlog.get_logger(__name__)
 
 ROLES = {
+    "productor": ["parcels:own"],
     "superadmin": ["*"],
     "administrador": ["users:*", "stations:*", "rules:*", "reports:*", "integrations:*"],
     "analista": ["stations:read", "alerts:*", "reports:*", "knowledge:*"],
@@ -108,7 +110,7 @@ async def _seed_rule(db: AsyncSession, crop: Crop, version: str, conditions_data
         rule_set = CropRuleSet(crop_id=crop.id, name=f"Reglas base {crop.name}", description="Reglas determinísticas versionadas.")
         db.add(rule_set)
         await db.flush()
-    rule = CropRuleVersion(rule_set_id=rule_set.id, crop_id=crop.id, name=f"Regla base {crop.name}", description="Seis condiciones base para evaluación diaria.", version=version, status="PUBLISHED", effective_from=date(2026, 1, 1), configuration={"moderate_min": 3, "severe_count": 6, "window_hours": 72}, substitution_rules={})
+    rule = CropRuleVersion(rule_set_id=rule_set.id, crop_id=crop.id, name=f"Regla base {crop.name}", description="Seis condiciones base para evaluación diaria.", version=version, status="PUBLISHED", effective_from=date(2026, 1, 1), configuration={"moderate_min": 2, "severe_count": 5, "window_hours": 72}, substitution_rules={})
     db.add(rule)
     await db.flush()
     for order, (key, label, variable, operator, minimum, maximum, value, unit) in enumerate(conditions_data, start=1):
@@ -150,7 +152,7 @@ async def _seed_agent(db: AsyncSession, crop: Crop, purpose: str) -> None:
         "PHENOLOGY_ANALYSIS": "PHENOLOGY",
         "YEAR_COMPARISON": "YEAR_COMPARE",
         "DAILY_DIGEST": "DAILY",
-    }[purpose]
+    }.get(purpose, purpose.upper())
     if purpose == "CROP_ANALYSIS":
         agent = await db.scalar(
             select(AIAgent).where(
@@ -275,9 +277,11 @@ async def seed_all(db: AsyncSession) -> None:
     await _seed_stages(db, wheat, WHEAT_STAGES)
     await _seed_rule(db, soy, "1.0.0", SOY_CONDITIONS, SOY_DISEASES)
     await _seed_rule(db, wheat, "1.0.0", WHEAT_CONDITIONS, WHEAT_DISEASES)
-    for crop in (soy, wheat, corn):
-        for purpose in AGENT_PURPOSES:
+    for crop in (soy, wheat):
+        for purpose in DEFAULT_PARCEL_PURPOSES:
             await _seed_agent(db, crop, purpose)
+    from app.services.agent_constellation import ensure_shared_agents
+    await ensure_shared_agents(db)
     station = await db.scalar(select(Station).where(Station.code == "RAUL-PENA"))
     if not station:
         station = Station(

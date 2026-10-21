@@ -105,7 +105,10 @@ async def build_forecast_risk(
         (
             await db.scalars(
                 select(PhenologyStage)
-                .where(PhenologyStage.crop_id == crop_id, PhenologyStage.active.is_(True))
+                .where(
+                    PhenologyStage.crop_id == crop_id, PhenologyStage.active.is_(True),
+                    PhenologyStage.deleted_at.is_(None), PhenologyStage.cycle_type == "normal",
+                )
                 .order_by(PhenologyStage.order_index)
             )
         ).all()
@@ -132,6 +135,7 @@ async def build_forecast_risk(
             threshold_value=item.threshold_value,
             unit=item.unit,
             required=item.required,
+            soil_alternative=item.soil_alternative,
         )
         for item in condition_rows
     ]

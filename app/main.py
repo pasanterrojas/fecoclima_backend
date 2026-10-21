@@ -49,7 +49,7 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Content-Type", "X-CSRF-Token", "X-Request-ID"],
+    allow_headers=["Accept", "Content-Type", "X-CSRF-Token", "X-Request-ID", "X-Parcel-Session", "X-Parcel-Access", "X-Chat-Browser"],
     expose_headers=["X-Request-ID", "X-Checksum-SHA256"],
 )
 

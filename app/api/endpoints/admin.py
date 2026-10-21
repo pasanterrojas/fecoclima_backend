@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DbSession
-from app.db.models import AIAgent, AlertEvaluation, AuditLog, BackgroundJob, Report, Station, SystemSetting, User, WeatherReading
+from app.db.models import Crop, Plot, AIAgent, AIAgentRun, AlertEvaluation, AuditLog, BackgroundJob, Report, Station, SystemSetting, User, WeatherReading
 from app.schemas.resources import SettingPayload
 from app.services.audit import write_audit
 from app.services.serialization import model_dict
@@ -23,6 +23,8 @@ async def summary(db: DbSession, _: AdminUser) -> dict:
         "readings_total": await count(select(func.count(WeatherReading.id))),
         "alerts_72h": await count(select(func.count(AlertEvaluation.id)).where(AlertEvaluation.evaluated_at >= datetime.now(UTC) - timedelta(hours=72))),
         "agents_active": await count(select(func.count(AIAgent.id)).where(AIAgent.active.is_(True), AIAgent.deleted_at.is_(None))),
+        "plots_total": await count(select(func.count(Plot.id)).where(Plot.deleted_at.is_(None), Plot.crop_id.is_not(None))),
+        "crops_active": await count(select(func.count(Crop.id)).where(Crop.active.is_(True), Crop.deleted_at.is_(None))),
         "reports_total": await count(select(func.count(Report.id))),
     }
 
@@ -31,6 +33,31 @@ async def summary(db: DbSession, _: AdminUser) -> dict:
 async def jobs(db: DbSession, _: AdminUser, limit: int = 50) -> list[dict]:
     rows = (await db.scalars(select(BackgroundJob).order_by(BackgroundJob.created_at.desc()).limit(min(limit, 250)))).all()
     return [model_dict(row) for row in rows]
+
+
+@router.get("/admin/ai-runs")
+async def recent_ai_runs(db: DbSession, _: AdminUser) -> dict:
+    """Operational transparency without leaking prompts, keys or provider error bodies."""
+    since = datetime.now(UTC) - timedelta(hours=24)
+    completed = await db.scalar(select(func.count(AIAgentRun.id)).where(AIAgentRun.created_at >= since, AIAgentRun.status == "COMPLETED"))
+    fallback = await db.scalar(select(func.count(AIAgentRun.id)).where(AIAgentRun.created_at >= since, AIAgentRun.status == "FALLBACK"))
+    rows = (await db.scalars(select(AIAgentRun).order_by(AIAgentRun.created_at.desc()).limit(12))).all()
+    items = []
+    for row in rows:
+        payload = row.input_payload or {}
+        output = row.output_payload or {}
+        reason = output.get("_fallback_reason") or output.get("fallback_reason")
+        if row.status == "FALLBACK" and not reason:
+            reason = "provider_auth" if "HTTP 401" in (row.error_message or "") else "provider_error"
+        items.append({
+            "created_at": row.created_at.isoformat(),
+            "status": row.status,
+            "reason": reason,
+            "widget": payload.get("widget"),
+            "model": row.model if row.status == "COMPLETED" else None,
+            "duration_ms": row.duration_ms,
+        })
+    return {"completed_24h": completed or 0, "fallback_24h": fallback or 0, "items": items}
 
 
 @router.get("/audit")
@@ -72,3 +99,11 @@ async def setting_delete(setting_id: uuid.UUID, request: Request, db: DbSession,
     await db.delete(row)
     await write_audit(db, action="SETTING_DELETE", user=actor, request=request, entity_type="system_setting", entity_id=str(setting_id))
     await db.commit(); return {"ok": True}
+
+
+@router.get("/audit/{audit_id}")
+async def get_audit(audit_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    row = await db.get(AuditLog, audit_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Evento de auditoría no encontrado")
+    return model_dict(row)

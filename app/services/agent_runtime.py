@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -22,11 +22,12 @@ from app.db.models import (
     KnowledgeDocument,
     Station,
 )
-from app.services.agent_defaults import normalize_response_policy, response_policy_prompt
+from app.services.agent_defaults import normalize_response_policy, response_policy_prompt, PURPOSE_THEMES
 from app.services.ai import (
     generate_markdown_response,
     grounded_chat_fallback_markdown,
     grounded_fallback_markdown,
+    provider_fallback_reason,
 )
 from app.services.analysis_context import build_complete_analysis_context
 from app.services.rag import retrieve_chunks
@@ -90,8 +91,10 @@ PROTOCOLO DE FUNDAMENTACIÓN OBLIGATORIO:
     output_protocol = """
 PROTOCOLO DE SALIDA PRIORITARIO:
 - Devuelve únicamente una respuesta final en Markdown legible para productores.
+- Habla como una persona que acompaña al productor: explica en palabras corrientes lo que ocurre, qué revisar y por qué. Reemplaza la jerga por expresiones cotidianas; no incluyas nombres internos de variables ni fórmulas. Si necesitas una cifra, explica antes qué significa para el cultivo.
 - No devuelvas JSON, objetos, claves entre comillas, bloques ```json ni esquemas de datos.
-- Usa títulos, párrafos, listas y emojis moderados cuando aporten claridad.
+- Prioriza párrafos fluidos y breves. Usa listas o títulos solo cuando faciliten una decisión.
+- Menciona exclusivamente el período seleccionado por el usuario; no describas ventanas de cálculo de otros períodos aunque aparezcan en documentos recuperados o instrucciones anteriores.
 - Esta instrucción reemplaza cualquier requisito anterior del prompt que solicite JSON o una estructura serializada.
 """.strip()
     presentation = response_policy_prompt(response_policy, purpose)
@@ -108,7 +111,8 @@ def _effective_chat_prompt(system_prompt: str) -> str:
             """
 PROTOCOLO DE CONVERSACIÓN CONTEXTUAL — PRIORIDAD MÁXIMA:
 - Responde primero la pregunta más reciente del productor y continúa naturalmente el historial. No vuelvas a redactar el widget de recomendación ni repitas todo el análisis salvo que te lo pidan.
-- Conserva como contexto la consulta completa: estación, cultivo, fecha de siembra, periodo, lecturas, regla determinística, fenología, pronóstico, comparación anual, documentos recuperados y Copernicus.
+- Usa un tono cálido y directo, como alguien que acompaña una recorrida del lote. Evita tecnicismos, nombres de variables, expresiones de código y porcentajes de confianza. Contesta en lenguaje natural, breve y fácil de llevar al campo.
+- Conserva como contexto la consulta completa: estación, cultivo, fecha de siembra, periodo, lecturas, regla determinística, fenología, pronóstico, comparación anual, documentos recuperados y Copernicus. Solo verbaliza resultados del período consultado; no menciones períodos alternativos.
 - Las instrucciones de títulos, secciones u orden pensadas para el widget “Recomendación para productores” no se aplican a este chat.
 - Si hay imágenes, describe por separado únicamente rasgos realmente visibles. Luego formula hipótesis prudentes y contrástalas con clima, etapa, reglas, documentos y satélite. Una imagen aislada no confirma enfermedad, plaga, deficiencia ni tratamiento.
 - Distingue siempre datos observados, cálculos, pronóstico, evidencia satelital, evidencia documental y observación visual. No inventes valores, síntomas, fechas, fuentes ni causalidad.
@@ -155,14 +159,15 @@ async def select_agent_version(
     *,
     fallback_purpose: str | None = None,
 ) -> tuple[AIAgent | None, AIAgentVersion | None]:
-    purposes = [purpose]
+    theme = PURPOSE_THEMES.get(purpose, purpose)
+    purposes = list(dict.fromkeys([theme, purpose]))
     if fallback_purpose and fallback_purpose not in purposes:
         purposes.append(fallback_purpose)
     for current_purpose in purposes:
         scopes: list[UUID | None] = [crop_id]
         # El boletín puede configurarse por cultivo o, como respaldo, con un
         # único agente general sin cultivo desde el CMS.
-        if current_purpose == "DAILY_DIGEST" and crop_id is not None:
+        if current_purpose in {"DAILY_DIGEST", "ORCHESTRATOR", "PDF_REPORT", "WEATHER_ANALYSIS", "FORECAST_ANALYSIS", "SATELLITE_ANALYSIS", "CROP_CHAT"} and crop_id is not None:
             scopes.append(None)
         for current_crop_id in scopes:
             query = select(AIAgent).where(
@@ -179,7 +184,7 @@ async def select_agent_version(
                 continue
             version = await db.scalar(
                 select(AIAgentVersion)
-                .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True))
+                .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True), AIAgentVersion.version == agent.current_version)
                 .order_by(AIAgentVersion.created_at.desc())
                 .limit(1)
             )
@@ -235,26 +240,12 @@ async def _knowledge_revision(
     crop_id: UUID,
     agent_id: UUID | None = None,
 ) -> Any:
+    scope = KnowledgeDocument.crop_id == crop_id
     if agent_id:
-        return await db.scalar(
-            select(func.max(KnowledgeDocument.updated_at))
-            .join(
-                AgentKnowledgeDocument,
-                AgentKnowledgeDocument.document_id == KnowledgeDocument.id,
-            )
-            .where(
-                AgentKnowledgeDocument.agent_id == agent_id,
-                KnowledgeDocument.active.is_(True),
-                KnowledgeDocument.deleted_at.is_(None),
-            )
-        )
-    return await db.scalar(
-        select(func.max(KnowledgeDocument.updated_at)).where(
-            KnowledgeDocument.crop_id == crop_id,
-            KnowledgeDocument.active.is_(True),
-            KnowledgeDocument.deleted_at.is_(None),
-        )
-    )
+        scope = or_(scope, KnowledgeDocument.id.in_(select(AgentKnowledgeDocument.document_id).where(AgentKnowledgeDocument.agent_id == agent_id)))
+    return await db.scalar(select(func.max(KnowledgeDocument.updated_at)).where(
+        scope, KnowledgeDocument.active.is_(True), KnowledgeDocument.deleted_at.is_(None)
+    ))
 
 
 def _signature(version: AIAgentVersion, knowledge_revision: Any, context: dict[str, Any], purpose: str) -> str:
@@ -408,7 +399,9 @@ async def run_agent_for_alert(
             .where(
                 AIAgentRun.alert_evaluation_id == alert.id,
                 AIAgentRun.agent_version_id == version.id,
-                AIAgentRun.status.in_(["COMPLETED", "FALLBACK"]),
+                # Nunca conservar un respaldo como si fuera una respuesta válida
+                # después de renovar la clave del proveedor.
+                AIAgentRun.status == "COMPLETED",
             )
             .order_by(AIAgentRun.created_at.desc())
             .limit(1)
@@ -449,11 +442,13 @@ async def run_agent_for_alert(
             temperature=version.temperature,
             max_tokens=min(max(version.max_tokens, 700), token_ceiling, 3000),
             response_policy=response_policy,
+            provider=version.provider or "OPENAI",
         )
         payload = {
             "markdown": result.get("markdown", ""),
             "sources": sources,
             "has_satellite_image": bool(image_data_url),
+            "_fallback_reason": "provider_not_configured" if result.get("fallback") else None,
         }
         run.status = "FALLBACK" if result.get("fallback") else "COMPLETED"
         run.output_payload = payload
@@ -463,14 +458,15 @@ async def run_agent_for_alert(
         return {
             **payload,
             "_agent_status": run.status.lower(),
-            "_fallback_reason": "provider_not_configured" if result.get("fallback") else None,
+            "_fallback_reason": payload["_fallback_reason"],
             "_run_id": str(run.id),
-            "_agent_name": agent.name,
+            "_agent_name": "Respaldo basado en datos" if result.get("fallback") else agent.name,
             "_agent_purpose": purpose,
-            "_model": run.model,
+            "_model": None if result.get("fallback") else run.model,
             "_cached": False,
         }
     except Exception as exc:
+        reason = provider_fallback_reason(exc)
         payload = {
             "markdown": grounded_fallback_markdown(
                 context,
@@ -479,9 +475,10 @@ async def run_agent_for_alert(
             ),
             "sources": sources,
             "has_satellite_image": False,
+            "_fallback_reason": reason,
         }
         run.status = "FALLBACK"
-        run.error_message = str(exc)[:3000]
+        run.error_message = f"{reason} · HTTP {exc.status_code}" if hasattr(exc, "status_code") else reason
         run.output_payload = payload
         run.finished_at = datetime.now(UTC)
         run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
@@ -489,11 +486,11 @@ async def run_agent_for_alert(
         return {
             **payload,
             "_agent_status": "fallback",
-            "_fallback_reason": "provider_error",
+            "_fallback_reason": reason,
             "_run_id": str(run.id),
-            "_agent_name": agent.name,
+            "_agent_name": "Respaldo basado en datos",
             "_agent_purpose": purpose,
-            "_model": run.model,
+            "_model": None,
             "_cached": False,
         }
 
@@ -625,6 +622,7 @@ async def chat_with_agent_for_alert(
             temperature=version.temperature,
             max_tokens=min(max(version.max_tokens, 600), token_ceiling, 3000),
             response_policy=chat_policy,
+            provider=version.provider or "OPENAI",
         )
         images_processed = bool(images) and not result.get("fallback")
         run.status = "FALLBACK" if result.get("fallback") else "COMPLETED"
@@ -640,21 +638,23 @@ async def chat_with_agent_for_alert(
         await db.commit()
         return {
             **result,
+            "fallback_reason": "provider_not_configured" if result.get("fallback") else None,
             "run_id": str(run.id),
-            "agent_name": agent.name,
+            "agent_name": "Respaldo basado en datos" if result.get("fallback") else agent.name,
             "agent_code": agent.code,
             "sources": sources,
             "has_image": images_processed,
             "image_count": len(images),
         }
     except Exception as exc:
+        reason = provider_fallback_reason(exc)
         markdown = grounded_chat_fallback_markdown(
             context,
             reason="provider_error",
             has_images=bool(images),
         )
         run.status = "FALLBACK"
-        run.error_message = str(exc)[:3000]
+        run.error_message = f"{reason} · HTTP {exc.status_code}" if hasattr(exc, "status_code") else reason
         run.output_payload = {
             "markdown": markdown,
             "model": run.model,
@@ -668,9 +668,9 @@ async def chat_with_agent_for_alert(
         return {
             "markdown": markdown,
             "fallback": True,
-            "fallback_reason": "provider_error",
+            "fallback_reason": reason,
             "run_id": str(run.id),
-            "agent_name": agent.name,
+            "agent_name": "Respaldo basado en datos",
             "agent_code": agent.code,
             "sources": sources,
             "has_image": False,

@@ -64,17 +64,30 @@ def calculate_stage(
             "timeline": timeline,
         }
 
-    selected = next(
-        (
-            stage
-            for stage in timeline
-            if int(stage["start_day"]) <= days <= int(stage["end_day"])
-        ),
-        None,
-    )
+    matches = [stage for stage in timeline if int(stage["start_day"]) <= days <= int(stage["end_day"])]
+    last = max(timeline, key=lambda stage: int(stage["end_day"]))
+    if len(matches) > 1 or (not matches and days <= int(last["end_day"])):
+        return {
+            "planting_date": planting_date.isoformat(),
+            "analysis_date": on_date.isoformat(),
+            "days_after_planting": days,
+            "stage_code": None,
+            "stage_name": "Calendario por revisar",
+            "description": (
+                "Hay etapas superpuestas para este día; revise el calendario del cultivo."
+                if len(matches) > 1 else
+                f"No hay una etapa configurada para el día {days} desde la siembra."
+            ),
+            "stage_start_day": None,
+            "stage_end_day": None,
+            "stage_progress_pct": None,
+            "cycle_finished": False,
+            "timeline": timeline,
+        }
+    selected = matches[0] if matches else None
     cycle_finished = False
     if selected is None:
-        selected = timeline[-1]
+        selected = last
         cycle_finished = days > int(selected["end_day"])
 
     start_day = int(selected["start_day"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from app.services.stage_codes import expand_stage_codes
 from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
@@ -8,9 +9,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import BaseCondition, CropRuleVersion, DiseaseRule, PhenologyStage, WeatherDailySummary
+from app.db.models import BaseCondition, CropRuleVersion, DiseaseRule, PhenologyStage, Station, WeatherDailySummary
 from app.services.alert_engine import ConditionSpec, normalize_alert_configuration, evaluate_daily_alert
 from app.services.phenology import calculate_stage
+from app.services.soil_measurements import SOIL_VARIABLE_UNITS, normalize_soil_unit, soil_rule_units, soil_rule_values
 
 SUPPORTED_VARIABLES = {
     "temperature_avg_c",
@@ -18,6 +20,7 @@ SUPPORTED_VARIABLES = {
     "rain_sum_mm",
     "soil_temperature_avg_c",
     "soil_moisture_avg_pct",
+    "soil_tension_avg_cb",
     "leaf_wetness_hours",
     "solar_sum_wm2_samples",
     "evapotranspiration_sum_mm",
@@ -29,6 +32,19 @@ def validate_condition_dict(condition: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if condition.get("variable") not in SUPPORTED_VARIABLES:
         errors.append(f"Variable no soportada: {condition.get('variable')}")
+    soil_unit = SOIL_VARIABLE_UNITS.get(condition.get("variable"))
+    if soil_unit and condition.get("unit") and normalize_soil_unit(condition["unit"]) != soil_unit:
+        errors.append(f"La variable {condition['variable']} requiere unidad {soil_unit}; tensión y porcentaje no son equivalentes")
+    alternative = condition.get("soil_alternative")
+    if alternative is not None:
+        from app.schemas.actions import SoilAlternativePayload
+        from pydantic import ValidationError
+        try:
+            parsed = SoilAlternativePayload.model_validate(alternative)
+            if not soil_unit or parsed.unit == soil_unit:
+                errors.append("El criterio alternativo requiere la otra unidad de suelo (% o cb)")
+        except ValidationError:
+            errors.append("El criterio alternativo del suelo no tiene umbrales y referencia válidos")
     operator = condition.get("operator")
     if operator not in SUPPORTED_OPERATORS:
         errors.append(f"Operador no soportado: {operator}")
@@ -96,6 +112,8 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
                     "threshold_min": condition.threshold_min,
                     "threshold_max": condition.threshold_max,
                     "threshold_value": condition.threshold_value,
+                    "unit": condition.unit,
+                    "soil_alternative": condition.soil_alternative,
                 }
             )
         )
@@ -119,12 +137,13 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
                 "threshold_min": condition.get("min", condition.get("threshold_min")),
                 "threshold_max": condition.get("max", condition.get("threshold_max")),
                 "threshold_value": condition.get("value", condition.get("threshold_value")),
+                "unit": condition.get("unit"),
             }
             errors.extend(
                 f"{disease.name}, parámetro {index}: {message}"
                 for message in validate_condition_dict(normalized_condition)
             )
-        unknown_stages = sorted(set(disease.valid_stages or []) - stage_codes)
+        unknown_stages = sorted(expand_stage_codes(disease.valid_stages or []) - expand_stage_codes(stage_codes))
         if unknown_stages:
             errors.append(
                 f"{disease.name}: etapas fenológicas no configuradas para el cultivo: "
@@ -136,7 +155,7 @@ async def validate_rule_version(db: AsyncSession, rule_id: UUID) -> dict[str, An
         errors.append("effective_to no puede ser anterior a effective_from")
 
     alert_config = normalize_alert_configuration(rule.configuration, len(conditions))
-    allowed_colors = {"green", "yellow", "orange", "red", "gray", "blue"}
+    allowed_colors = {"green", "yellow", "amber", "orange", "red", "gray", "blue"}
     if str(alert_config.get("missing_required_policy") or "").upper() not in {"DATOS_INSUFICIENTES", "CONTINUE"}:
         errors.append("La política de datos faltantes debe ser DATOS_INSUFICIENTES o CONTINUE")
     for code, item in alert_config["levels"].items():
@@ -189,6 +208,7 @@ async def _stage_for_day(
                     PhenologyStage.crop_id == crop_id,
                     PhenologyStage.active.is_(True),
                     PhenologyStage.deleted_at.is_(None),
+                    PhenologyStage.cycle_type == "normal",
                 )
                 .order_by(PhenologyStage.order_index)
             )
@@ -219,6 +239,11 @@ async def simulate_rule(
     rule = await db.get(CropRuleVersion, rule_id)
     if not rule:
         raise ValueError("Versión de regla no encontrada")
+    station = await db.get(Station, station_id)
+    if not station or station.deleted_at:
+        raise ValueError("Estación no encontrada")
+    from app.services.weather import effective_soil_moisture_unit
+    measured_soil_unit = effective_soil_moisture_unit(station)
     validation = await validate_rule_version(db, rule_id)
     if validation["errors"]:
         raise ValueError("La versión no es simulable: " + "; ".join(validation["errors"]))
@@ -252,6 +277,7 @@ async def simulate_rule(
             threshold_value=item.threshold_value,
             unit=item.unit,
             required=item.required,
+            soil_alternative=item.soil_alternative,
         )
         for item in conditions
     ]
@@ -294,12 +320,13 @@ async def simulate_rule(
         }
         stage = await _stage_for_day(db, rule.crop_id, planting_date, current)
         result = evaluate_daily_alert(
-            values,
+            soil_rule_values(values, measured_soil_unit),
             specs,
             stage_code=stage,
             disease_rules=disease_specs,
             data_completeness=(summary.completeness_pct / 100) if summary else 0,
             alert_configuration=rule.configuration,
+            observed_units=soil_rule_units(measured_soil_unit),
         )
         days.append({"date": current.isoformat(), "stage_code": stage, **result})
         current += timedelta(days=1)

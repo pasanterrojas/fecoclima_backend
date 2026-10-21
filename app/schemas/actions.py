@@ -139,14 +139,40 @@ class CycleStageUpdatePayload(BaseModel):
     notes: str | None = Field(default=None, max_length=3000)
 
 
+class SoilAlternativePayload(BaseModel):
+    unit: Literal["%", "cb"]
+    operator: Literal["between", "gt", "gte", "lt", "lte", "eq"]
+    threshold_min: float | None = Field(default=None, allow_inf_nan=False)
+    threshold_max: float | None = Field(default=None, allow_inf_nan=False)
+    threshold_value: float | None = Field(default=None, allow_inf_nan=False)
+    source_reference: str = Field(min_length=3, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_criterion(self):
+        if not self.source_reference.strip():
+            raise ValueError("Indique la referencia técnica del criterio alternativo")
+        if self.operator == "between":
+            if self.threshold_min is None or self.threshold_max is None or self.threshold_min > self.threshold_max:
+                raise ValueError("El rango alternativo requiere mínimo y máximo ordenados")
+            thresholds = [self.threshold_min, self.threshold_max]
+        else:
+            if self.threshold_value is None:
+                raise ValueError("Indique el umbral alternativo")
+            thresholds = [self.threshold_value]
+        if any(value < 0 or (self.unit == "%" and value > 100) for value in thresholds):
+            raise ValueError("Los umbrales deben ser no negativos; el porcentaje no puede superar 100")
+        return self
+
+
 class BaseConditionPayload(BaseModel):
+    soil_alternative: SoilAlternativePayload | None = None
     key: str = Field(min_length=1, max_length=80)
     label: str = Field(min_length=2, max_length=180)
     variable: str = Field(min_length=1, max_length=100)
     operator: Literal["between", "gt", "gte", "lt", "lte", "eq"]
-    threshold_min: float | None = None
-    threshold_max: float | None = None
-    threshold_value: float | None = None
+    threshold_min: float | None = Field(default=None, allow_inf_nan=False)
+    threshold_max: float | None = Field(default=None, allow_inf_nan=False)
+    threshold_value: float | None = Field(default=None, allow_inf_nan=False)
     unit: str | None = Field(default=None, max_length=40)
     aggregation: str = Field(default="daily", max_length=50)
     required: bool = True
@@ -155,6 +181,15 @@ class BaseConditionPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_threshold(self):
+        from app.services.soil_measurements import SOIL_VARIABLE_UNITS, normalize_soil_unit
+        expected_soil_unit = SOIL_VARIABLE_UNITS.get(self.variable)
+        if expected_soil_unit:
+            if self.unit and normalize_soil_unit(self.unit) != expected_soil_unit:
+                raise ValueError(f"La variable {self.variable} requiere unidad {expected_soil_unit}; tensión y porcentaje no son equivalentes")
+            self.unit = expected_soil_unit
+        if self.soil_alternative:
+            if not expected_soil_unit or self.soil_alternative.unit == expected_soil_unit:
+                raise ValueError("El criterio alternativo requiere una variable de suelo y la otra unidad (% o cb)")
         if self.operator == "between":
             if self.threshold_min is None or self.threshold_max is None:
                 raise ValueError("between requiere threshold_min y threshold_max")
@@ -201,6 +236,8 @@ class BackgroundJobPayload(BaseModel):
         "DATABASE_BACKUP",
         "CLEANUP_FILES",
         "DAILY_PRODUCER_DIGEST",
+        "NOTIFICATION_EVENT_EVALUATE",
+        "NOTIFICATION_EVENT_SINGLE",
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
     priority: int = Field(default=100, ge=1, le=1000)
@@ -263,8 +300,6 @@ class ProducerNotificationSettingsPayload(BaseModel):
         except ZoneInfoNotFoundError as exc:
             raise ValueError("La zona horaria no es válida") from exc
         self.recipients = sorted({str(item).strip().lower() for item in self.recipients if str(item).strip()})
-        if self.email_enabled and not self.recipients:
-            raise ValueError("Agregue al menos un destinatario de correo")
         if self.active and not self.contexts:
             raise ValueError("Agregue al menos una estación, cultivo y fecha de siembra")
         return self

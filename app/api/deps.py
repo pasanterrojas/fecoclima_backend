@@ -66,4 +66,5 @@ def require_roles(*allowed: str):
 
 
 AdminUser = Annotated[User, Depends(require_roles("superadmin", "administrador"))]
+SuperAdminUser = Annotated[User, Depends(require_roles("superadmin"))]
 AnalystUser = Annotated[User, Depends(require_roles("superadmin", "administrador", "analista"))]

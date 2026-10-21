@@ -5,11 +5,11 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.core.config import settings
 from app.core.logging import configure_logging
-from app.db.models import Station
+from app.db.models import NotificationRequestLog, Plot, Station
 from app.db.session import AsyncSessionLocal
 from app.services.jobs import enqueue_unique
 from app.services.producer_notifications import sync_telegram_subscriptions
@@ -20,7 +20,7 @@ logger = structlog.get_logger(__name__)
 
 async def schedule_station_jobs() -> None:
     today = datetime.now(UTC).date()
-    date_from = today - timedelta(days=3)
+    date_from = today - timedelta(days=6)
     scheduled = 0
     async with AsyncSessionLocal() as db:
         stations = list(
@@ -64,7 +64,17 @@ async def schedule_station_jobs() -> None:
                     priority=120,
                 )
                 scheduled += int(satellite_job is not None)
+        plots = list((await db.scalars(select(Plot).where(Plot.active.is_(True),
+                      Plot.deleted_at.is_(None), Plot.geojson.is_not(None), Plot.crop_id.is_not(None)))).all())
+        for plot in plots:
+            await enqueue_unique(db, "PLOT_SATELLITE_SYNC", {"plot_id": str(plot.id)}, priority=125)
     logger.info("scheduled_station_jobs", stations=len(stations), jobs=scheduled)
+
+
+async def schedule_plot_alerts() -> None:
+    async with AsyncSessionLocal() as db:
+        await enqueue_unique(db, "PLOT_ALERT_MONITOR", {}, priority=35)
+        await enqueue_unique(db, "PLOT_ALERT_DISPATCH", {}, priority=40)
 
 
 async def schedule_cleanup() -> None:
@@ -94,6 +104,12 @@ async def schedule_daily_digest() -> None:
             {"force": False, "hour_key": hour_key},
             priority=40,
         )
+
+
+async def schedule_notification_events() -> None:
+    async with AsyncSessionLocal() as db:
+        # Unique payload avoids overlapping evaluation batches.
+        await enqueue_unique(db, "NOTIFICATION_EVENT_EVALUATE", {}, priority=42)
 
 
 async def poll_telegram_subscriptions() -> None:
@@ -142,6 +158,12 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(schedule_notification_events, "interval", minutes=5,
+                      max_instances=1, coalesce=True,
+                      next_run_time=datetime.now(UTC) + timedelta(seconds=90))
+    scheduler.add_job(schedule_plot_alerts, "interval", minutes=5,
+                      max_instances=1, coalesce=True,
+                      next_run_time=datetime.now(UTC) + timedelta(seconds=60))
     scheduler.start()
     logger.info(
         "scheduler_started",

@@ -18,12 +18,13 @@ from app.core.config import settings
 from app.core.crypto import decrypt_secret
 from app.db.models import IntegrationConfig, Plot, SatelliteObservation, Station
 from app.services.serialization import model_dict
+from app.services.spectral_palettes import INDEX_CLASSES, VISUAL_VERSION, index_legend
 
 logger = structlog.get_logger(__name__)
 _token_cache: dict[str, dict[str, Any]] = {}
 _catalog_scene_cache: dict[str, dict[str, Any]] = {}
 
-INDEX_NAMES = ("ndvi", "ndmi", "ndwi", "evi", "savi", "ndre", "gndvi", "nbr", "msi")
+INDEX_NAMES = ("ndvi", "ndmi", "ndwi", "evi", "savi", "ndre", "gndvi", "nbr", "msi", "recl")
 
 
 def _number(value: Any, default: float) -> float:
@@ -447,6 +448,23 @@ def _statistics_resolution_degrees(
     )
 
 
+def _bounded_statistics_resolution_m(
+    geometry: dict[str, Any], requested_resolution_m: float, *, max_side_pixels: int = 1200
+) -> float:
+    """Keep broad station geozones within the Statistical API's 2500px/side limit.
+
+    A 100 km-radius station covers ~20,000 samples per side at 10 metres. The
+    service rejects that request before any fresh image can be accepted. Use a
+    coarser *declared* resolution for broad regions, without changing the AOI
+    or claiming the resulting pixels represent parcel-level detail.
+    """
+    west, south, east, north = _geometry_bbox(geometry)
+    latitude = _geometry_reference_latitude(geometry)
+    width_m = abs(east - west) * 111_320.0 * max(0.05, abs(math.cos(math.radians(latitude))))
+    height_m = abs(north - south) * 111_320.0
+    return max(float(requested_resolution_m), float(math.ceil(max(width_m, height_m) / (max_side_pixels - 2))))
+
+
 def _ring_area_m2(ring: list[list[float]], reference_latitude: float) -> float:
     if len(ring) < 4:
         return 0.0
@@ -520,6 +538,8 @@ async def _search_copernicus_catalog_for_geometry(
     date_to: date,
     max_cloud_percentage: float = 40,
     max_items: int = 20,
+    *,
+    collection_override: str | None = None,
 ) -> dict[str, Any]:
     """Search CDSE robustly, with retries and an authenticated official fallback.
 
@@ -527,7 +547,7 @@ async def _search_copernicus_catalog_for_geometry(
     tried first. Public STAC remains a retry/fallback path; transient provider
     errors are never reported as invalid station geometry.
     """
-    collection = _collection(integration)
+    collection = collection_override or _collection(integration)
     limit = max(1, min(int(max_items), 100))
     datetime_range = f"{date_from.isoformat()}T00:00:00Z/{date_to.isoformat()}T23:59:59Z"
     bbox = _geometry_bbox(geometry)
@@ -545,6 +565,8 @@ async def _search_copernicus_catalog_for_geometry(
         "datetime": datetime_range,
         "limit": limit,
     }
+    if collection.startswith("sentinel-1"):
+        full_payload.pop("query", None)
     simple_bbox = {
         "collections": [collection],
         "bbox": bbox,
@@ -789,16 +811,17 @@ function setup() { return { input: ["B02","B03","B04","dataMask"], output: { ban
 function evaluatePixel(s) { return [2.5*s.B04*s.dataMask, 2.5*s.B03*s.dataMask, 2.5*s.B02*s.dataMask]; }
 """
 
-INDEX_VISUAL_CONFIG: dict[str, dict[str, Any]] = {
-    "ndvi": {"expression": "ratio(s.B08,s.B04)", "min": -0.2, "max": 0.9, "palette": [[0.42,0.22,0.08],[0.92,0.78,0.25],[0.35,0.68,0.25],[0.04,0.34,0.12]]},
-    "ndmi": {"expression": "ratio(s.B08,s.B11)", "min": -0.5, "max": 0.7, "palette": [[0.70,0.28,0.12],[0.93,0.79,0.35],[0.20,0.66,0.58],[0.04,0.25,0.55]]},
-    "ndwi": {"expression": "ratio(s.B03,s.B08)", "min": -0.6, "max": 0.6, "palette": [[0.55,0.33,0.13],[0.78,0.74,0.52],[0.28,0.74,0.78],[0.03,0.22,0.63]]},
-    "evi": {"expression": "2.5*divide(s.B08-s.B04,s.B08+6*s.B04-7.5*s.B02+1)", "min": -0.2, "max": 0.9, "palette": [[0.45,0.20,0.08],[0.94,0.76,0.22],[0.29,0.70,0.25],[0.02,0.30,0.09]]},
-    "savi": {"expression": "1.5*divide(s.B08-s.B04,s.B08+s.B04+0.5)", "min": -0.2, "max": 0.9, "palette": [[0.48,0.24,0.10],[0.90,0.73,0.26],[0.42,0.72,0.24],[0.04,0.34,0.11]]},
-    "ndre": {"expression": "ratio(s.B8A,s.B05)", "min": -0.2, "max": 0.7, "palette": [[0.48,0.18,0.16],[0.91,0.67,0.24],[0.45,0.72,0.29],[0.04,0.36,0.15]]},
-    "gndvi": {"expression": "ratio(s.B08,s.B03)", "min": -0.2, "max": 0.9, "palette": [[0.49,0.22,0.08],[0.91,0.78,0.27],[0.28,0.68,0.30],[0.02,0.31,0.13]]},
-    "nbr": {"expression": "ratio(s.B08,s.B12)", "min": -0.6, "max": 0.9, "palette": [[0.55,0.07,0.06],[0.94,0.56,0.18],[0.69,0.78,0.32],[0.04,0.38,0.14]]},
-    "msi": {"expression": "divide(s.B11,s.B08)", "min": 0.2, "max": 2.5, "palette": [[0.04,0.34,0.50],[0.30,0.70,0.53],[0.94,0.75,0.24],[0.66,0.08,0.06]]},
+INDEX_EXPRESSIONS = {
+    "ndvi": "ratio(s.B08,s.B04)", "ndmi": "ratio(s.B08,s.B11)",
+    "ndwi": "ratio(s.B03,s.B08)",
+    "evi": "2.5*divide(s.B08-s.B04,s.B08+6*s.B04-7.5*s.B02+1)",
+    "savi": "1.5*divide(s.B08-s.B04,s.B08+s.B04+0.5)",
+    "ndre": "ratio(s.B8A,s.B05)", "gndvi": "ratio(s.B08,s.B03)",
+    "nbr": "ratio(s.B08,s.B12)", "msi": "divide(s.B11,s.B08)",
+    "recl": "divide(s.B07,s.B05)-1",
+}
+INDEX_VISUAL_CONFIG = {
+    name: {**config, "expression": INDEX_EXPRESSIONS[name]} for name, config in INDEX_CLASSES.items()
 }
 
 
@@ -806,32 +829,70 @@ def _index_visual_evalscript(index_name: str) -> str:
     config = INDEX_VISUAL_CONFIG.get(index_name)
     if not config:
         raise ValueError(f"Índice visual no soportado: {index_name}")
-    palette = json.dumps(config["palette"], separators=(",", ":"))
+    palette = [[int(color[i:i+2], 16) / 255 for i in (1, 3, 5)] for color in config["colors"]]
     return f"""//VERSION=3
+// {VISUAL_VERSION}: fixed classes; identical for every acquisition.
 function setup() {{
-  return {{ input: [{{bands:["B02","B03","B04","B05","B08","B8A","B11","B12","SCL","dataMask"]}}], output: {{bands:4, sampleType:"AUTO"}} }};
+  return {{ input: [{{bands:["B02","B03","B04","B05","B07","B08","B8A","B11","B12","SCL","dataMask"]}}], output: {{bands:4, sampleType:"AUTO"}} }};
 }}
-function ratio(a,b) {{ return Math.abs(a+b) < 0.000001 ? 0 : (a-b)/(a+b); }}
-function divide(a,b) {{ return Math.abs(b) < 0.000001 ? 0 : a/b; }}
-function mix(a,b,t) {{ return a + (b-a)*t; }}
+function ratio(a,b) {{ return Math.abs(a+b) < 0.000001 ? NaN : (a-b)/(a+b); }}
+function divide(a,b) {{ return Math.abs(b) < 0.000001 ? NaN : a/b; }}
 function palette(value) {{
-  const minValue = {float(config['min'])};
-  const maxValue = {float(config['max'])};
-  const colors = {palette};
-  const t = Math.max(0, Math.min(1, (value-minValue)/(maxValue-minValue)));
-  const scaled = t*(colors.length-1);
-  const left = Math.min(colors.length-2, Math.floor(scaled));
-  const local = scaled-left;
-  return [mix(colors[left][0],colors[left+1][0],local),mix(colors[left][1],colors[left+1][1],local),mix(colors[left][2],colors[left+1][2],local)];
+  const breaks = {json.dumps(config['breaks'])};
+  const colors = {json.dumps(palette, separators=(',', ':'))};
+  for (let i=0; i<breaks.length; i++) if (value <= breaks[i]) return colors[i];
+  return colors[colors.length-1];
 }}
 function evaluatePixel(s) {{
   const invalid = s.dataMask !== 1 || [0,1,3,8,9,10,11].includes(s.SCL);
   if (invalid) return [0,0,0,0];
   const value = {config['expression']};
+  if (!Number.isFinite(value)) return [0,0,0,0];
   const color = palette(value);
   return [color[0],color[1],color[2],1];
 }}
 """
+
+
+def _current_visual_paths(observation: SatelliteObservation | None) -> dict[str, str]:
+    if not observation:
+        return {}
+    versions = (observation.raw_payload or {}).get("index_visual_versions") or {}
+    return {name: path for name, path in _local_index_paths(observation).items()
+            if versions.get(name) == VISUAL_VERSION}
+
+
+def versioned_index_url(root: str, name: str, versions: dict[str, str]) -> str:
+    suffix = f"?v={VISUAL_VERSION}" if versions.get(name) == VISUAL_VERSION else ""
+    return f"{root}/{name}.png{suffix}"
+
+
+def _visual_metadata(observation: SatelliteObservation) -> dict[str, Any]:
+    raw = observation.raw_payload or {}
+    versions = raw.get("index_visual_versions") or {}
+    paths = _local_index_paths(observation)
+    current = {name for name in paths if versions.get(name) == VISUAL_VERSION}
+    return {
+        "index_visual_versions": {name: versions.get(name, "legacy-continuous") for name in paths},
+        "index_legends": {name: index_legend(name) for name in current},
+        "visual_grid": raw.get("visual_grid"),
+        "classification_warning": (
+            "Hay capas con la escala anterior. Actualice las fuentes para aplicar los rangos del cliente."
+            if paths.keys() - current else None
+        ),
+    }
+
+
+def _visual_grid(geometry: dict[str, Any]) -> dict[str, Any]:
+    # WGS84 output, metric size at the AOI latitude; bounded for the provider.
+    resolution = _bounded_statistics_resolution_m(geometry, 5, max_side_pixels=2500)
+    resx, resy = _statistics_resolution_degrees(geometry, resolution)
+    west, south, east, north = _geometry_bbox(geometry)
+    return {"width": max(1, math.ceil((east-west)/resx)),
+            "height": max(1, math.ceil((north-south)/resy)),
+            "target_resolution_m": 5, "output_resolution_m": resolution,
+            "native_resolution_m": [10, 20], "resampling": "NEAREST",
+            "note": "Malla aproximada a la latitud de la parcela; remuestreo sin detalle nativo adicional."}
 
 
 def _scene_time_range(captured_at: datetime) -> tuple[datetime, datetime]:
@@ -859,7 +920,7 @@ def _statistics_time_range(captured_at: datetime) -> tuple[datetime, datetime]:
 INDEX_EVALSCRIPT = """//VERSION=3
 function setup() {
   return {
-    input: [{bands:["B02","B03","B04","B05","B08","B8A","B11","B12","SCL","dataMask"]}],
+    input: [{bands:["B02","B03","B04","B05","B07","B08","B8A","B11","B12","SCL","dataMask"]}],
     output: [
       {id:"ndvi", bands:1, sampleType:"FLOAT32"},
       {id:"ndmi", bands:1, sampleType:"FLOAT32"},
@@ -870,6 +931,7 @@ function setup() {
       {id:"gndvi", bands:1, sampleType:"FLOAT32"},
       {id:"nbr", bands:1, sampleType:"FLOAT32"},
       {id:"msi", bands:1, sampleType:"FLOAT32"},
+      {id:"recl", bands:1, sampleType:"FLOAT32"},
       {id:"dataMask", bands:1}
     ]
   };
@@ -889,6 +951,7 @@ function evaluatePixel(s) {
     gndvi:[ratio(s.B08,s.B03)],
     nbr:[ratio(s.B08,s.B12)],
     msi:[divide(s.B11,s.B08)],
+    recl:[Math.abs(s.B05) < 0.000001 ? NaN : s.B07/s.B05-1],
     dataMask:[valid]
   };
 }
@@ -909,6 +972,8 @@ def _process_payload(
     evalscript: str,
     media_type: str,
 ) -> dict[str, Any]:
+    grid = _visual_grid(geometry)
+    # SCL is categorical: nearest-neighbour preserves cloud classes as integers.
     return {
         "input": {
             "bounds": _bounds(geometry),
@@ -919,9 +984,10 @@ def _process_payload(
                     "mosaickingOrder": "mostRecent",
                     "maxCloudCoverage": max_cloud,
                 },
+                "processing": {"upsampling": "NEAREST", "downsampling": "NEAREST"},
             }],
         },
-        "output": {"width": 640, "height": 640, "responses": [{"identifier": "default", "format": {"type": media_type}}]},
+        "output": {"width": grid["width"], "height": grid["height"], "responses": [{"identifier": "default", "format": {"type": media_type}}]},
         "evalscript": evalscript,
     }
 
@@ -1000,8 +1066,10 @@ def _stat_value(stats: dict[str, Any], key: str) -> float | int | None:
     if value is None:
         return None
     try:
+        if not math.isfinite(float(value)):
+            return None
         return int(value) if key in {"sampleCount", "noDataCount"} else round(float(value), 4)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -1023,7 +1091,7 @@ def _parse_output_statistics(result: dict[str, Any], output_name: str) -> dict[s
     weighted_rows: list[tuple[float, int]] = []
     for item in rows:
         mean = item.get("mean")
-        if mean is None:
+        if mean is None or not math.isfinite(float(mean)):
             continue
         row_samples = int(item.get("sampleCount") or 0)
         row_no_data = int(item.get("noDataCount") or 0)
@@ -1038,16 +1106,18 @@ def _parse_output_statistics(result: dict[str, Any], output_name: str) -> dict[s
     )
     percentiles = rows[-1].get("percentiles") or {}
     coverage = round(valid_pixel_count * 100 / sample_count, 2) if sample_count else 0.0
+    minima = [float(item["min"]) for item in rows if item.get("min") is not None and math.isfinite(float(item["min"]))]
+    maxima = [float(item["max"]) for item in rows if item.get("max") is not None and math.isfinite(float(item["max"]))]
     return {
-        "min": min(float(item["min"]) for item in rows if item.get("min") is not None) if any(item.get("min") is not None for item in rows) else None,
-        "max": max(float(item["max"]) for item in rows if item.get("max") is not None) if any(item.get("max") is not None for item in rows) else None,
+        "min": min(minima) if minima else None,
+        "max": max(maxima) if maxima else None,
         "mean": None if weighted_mean is None else round(weighted_mean, 4),
         "stdev": _stat_value(rows[-1], "stDev"),
         "sample_count": sample_count,
         "no_data_count": no_data_count,
         "valid_pixel_count": valid_pixel_count,
         "valid_coverage_percentage": coverage,
-        "percentiles": {str(key): round(float(value), 4) for key, value in percentiles.items()},
+        "percentiles": {str(key): round(float(value), 4) for key, value in percentiles.items() if value is not None and math.isfinite(float(value))},
     }
 
 
@@ -1085,6 +1155,7 @@ async def _index_statistics(
 ) -> dict[str, Any]:
     token = await _access_token(integration)
     time_from, time_to = _statistics_time_range(captured_at)
+    resolution_m = _bounded_statistics_resolution_m(geometry, resolution_m)
     resx_degrees, resy_degrees = _statistics_resolution_degrees(geometry, resolution_m)
     area_m2 = _geometry_area_m2(geometry)
     estimated_pixels = max(1, int(round(area_m2 / max(1.0, resolution_m**2))))
@@ -1194,7 +1265,7 @@ def satellite_observation_is_complete(observation: SatelliteObservation | None) 
     return bool(
         has_indices
         and local_satellite_image_path(observation)
-        and len(_local_index_paths(observation)) == len(INDEX_NAMES)
+        and set(INDEX_NAMES) - {"recl"} <= _local_index_paths(observation).keys()
         and str(raw.get("processing_status") or "") == "PROCESSED"
     )
 
@@ -1355,8 +1426,9 @@ def _cached_observation_result(
         "quality": quality,
         "processing_error": raw.get("processing_error"),
         "image_available": bool(local_satellite_image_path(observation)),
-        "index_images": {name: f"/api/v1/public/satellite/{observation.id}/indices/{name}.png" for name in index_paths},
+        "index_images": {name: versioned_index_url(f"/api/v1/public/satellite/{observation.id}/indices", name, raw.get("index_visual_versions") or {}) for name in index_paths},
         "visual_layers_available": len(index_paths),
+        **_visual_metadata(observation),
         "processing_credentials_configured": credentials_ready,
         "plot_id": str(plot.id),
         "data_source_mode": raw.get("data_source_mode") or "LATEST_VALID_SCENE",
@@ -1429,7 +1501,9 @@ async def _evaluate_catalog_candidates(
     existing_by_scene = {
         str((row.raw_payload or {}).get("scene_id")): row
         for row in existing_rows
-        if (row.raw_payload or {}).get("scene_id")
+        if (row.raw_payload or {}).get("scene_id") and (
+            not getattr(plot, "planting_date", None) or (row.raw_payload or {}).get("processing_geometry") == geometry
+        )
     }
     attempts: list[dict[str, Any]] = []
     statistics_by_day: dict[date, dict[str, Any]] = {}
@@ -1445,7 +1519,8 @@ async def _evaluate_catalog_candidates(
                 raw = existing.raw_payload or {}
                 cached_statistics = raw.get("statistics") or {}
                 cached_quality = _observation_quality(existing)
-                if cached_statistics and cached_quality.get("valid_pixels"):
+                if (cached_statistics and cached_quality.get("valid_pixels")
+                        and all(name in cached_statistics for name in INDEX_NAMES)):
                     stats_result = {
                         **_observation_indices(existing),
                         "indices": _observation_indices(existing),
@@ -1627,7 +1702,7 @@ def build_satellite_analysis(
 
     for code, label in [
         ("evi", "EVI"), ("savi", "SAVI"), ("ndre", "NDRE"),
-        ("gndvi", "GNDVI"), ("nbr", "NBR"), ("msi", "MSI"),
+        ("gndvi", "GNDVI"), ("nbr", "NBR"), ("msi", "MSI"), ("recl", "ReCl"),
     ]:
         value = indices.get(code)
         if value is not None:
@@ -1752,12 +1827,13 @@ async def satellite_observation_payload(
             else observation.source_url
         ),
         "index_images": {
-            name: (f"/api/v1/public/satellite/{observation.id}/indices/{name}.png" if local_satellite_index_image_path(observation, name) else None)
+            name: (versioned_index_url(f"/api/v1/public/satellite/{observation.id}/indices", name, raw.get("index_visual_versions") or {}) if local_satellite_index_image_path(observation, name) else None)
             for name in INDEX_NAMES
         },
         "visual_layers_available": sum(
             1 for name in INDEX_NAMES if local_satellite_index_image_path(observation, name)
         ),
+        **_visual_metadata(observation),
         "indices": raw.get("indices") or {
             "ndvi": observation.ndvi,
             "ndmi": observation.ndmi,
@@ -1824,17 +1900,22 @@ def _local_index_paths(observation: SatelliteObservation | None) -> dict[str, st
 
 async def sync_satellite_for_station(
     db: AsyncSession,
-    station_id: UUID | str,
+    station_id: UUID | str | None,
     *,
     crop_id: UUID | None = None,
     force: bool = False,
     target_date: date | None = None,
     scene_id: str | None = None,
+    plot_id: UUID | None = None,
 ) -> dict[str, Any]:
-    station = await db.get(Station, station_id)
-    if not station or station.deleted_at:
+    station = await db.get(Station, station_id) if station_id else None
+    if station_id and (not station or station.deleted_at):
         raise ValueError("Estación no encontrada")
-    plot = await ensure_station_plot(db, station, crop_id)
+    if not plot_id and not station:
+        raise ValueError("Indique una parcela o estación")
+    plot = await db.get(Plot, plot_id) if plot_id else await ensure_station_plot(db, station, crop_id)
+    if not plot or not plot.active or plot.deleted_at:
+        raise ValueError("Parcela no disponible")
     integration = await _integration(db)
     runtime = satellite_runtime_config(integration)
     client_id, client_secret = _oauth_credentials(integration)
@@ -1842,13 +1923,17 @@ async def sync_satellite_for_station(
 
     # Public users can trigger this endpoint at the same time. Serialize the
     # expensive provider work and re-check the cache after acquiring the lock.
-    await _acquire_station_refresh_lock(db, station.id, crop_id)
+    await _acquire_station_refresh_lock(db, plot.id if plot_id else station.id, crop_id)
     latest_valid = await _latest_complete_observation(db, plot.id)
+    if plot_id and latest_valid and (latest_valid.raw_payload or {}).get("processing_geometry") != plot.geojson:
+        latest_valid = None
     explicit_request = target_date is not None or scene_id is not None
     if (
         latest_valid
         and not force
         and not explicit_request
+        and len(_current_visual_paths(latest_valid)) == len(INDEX_NAMES)
+        and "recl" in ((latest_valid.raw_payload or {}).get("indices") or {})
         and not satellite_catalog_cache_is_stale(latest_valid, runtime)
     ):
         return _cached_observation_result(
@@ -1986,10 +2071,16 @@ async def sync_satellite_for_station(
         select(SatelliteObservation).where(
             SatelliteObservation.plot_id == plot.id,
             SatelliteObservation.captured_at == captured_at,
+            SatelliteObservation.provider == "COPERNICUS_DATA_SPACE_SENTINEL_2_L2A",
         )
     )
     existing_raw = dict(existing.raw_payload or {}) if existing else {}
-    if existing and satellite_observation_is_complete(existing) and accepted:
+    if plot_id and existing and existing_raw.get("processing_geometry") != plot.geojson:
+        existing = None
+        existing_raw = {}
+    if (existing and satellite_observation_is_complete(existing) and accepted
+            and len(_current_visual_paths(existing)) == len(INDEX_NAMES)
+            and "recl" in (existing_raw.get("indices") or {})):
         existing_raw.update({
             "catalog_checked_at": now.isoformat(),
             "latest_catalog_scene_at": latest_catalog_at.isoformat(),
@@ -2022,6 +2113,8 @@ async def sync_satellite_for_station(
     existing_local_image = local_satellite_image_path(existing) if existing else None
     local_image_path: str | None = str(existing_local_image) if existing_local_image else None
     local_index_image_paths: dict[str, str] = _local_index_paths(existing)
+    current_visual_paths = _current_visual_paths(existing)
+    visual_versions = dict(existing_raw.get("index_visual_versions") or {})
     processing_error: str | None = None
     observation_id = existing.id if existing else uuid4()
     source_url = existing.source_url if existing and existing.source_url else (preview_url[:1000] if preview_url else None)
@@ -2030,7 +2123,7 @@ async def sync_satellite_for_station(
         start, end = _scene_time_range(captured_at)
         phase_errors: list[str] = []
         image_ready = bool(local_image_path and Path(str(local_image_path)).is_file())
-        visual_layers_ready = len(local_index_image_paths) == len(INDEX_NAMES)
+        visual_layers_ready = len(current_visual_paths) == len(INDEX_NAMES)
         statistics_ready = False
 
         if stats_result:
@@ -2066,23 +2159,25 @@ async def sync_satellite_for_station(
                 phase_errors.append(f"Imagen RGB: {message}")
 
         if not visual_layers_ready:
-            missing = set(INDEX_NAMES) - set(local_index_image_paths)
+            missing = set(INDEX_NAMES) - set(current_visual_paths)
             images, visual_errors = await _process_index_images(
                 geometry, start, end, runtime["provider_tile_cloud_ceiling_percentage"], integration, only=missing
             )
             layer_dir = settings.storage_path / "satellite" / str(observation_id)
             layer_dir.mkdir(parents=True, exist_ok=True)
             for name, content in images.items():
-                layer_path = layer_dir / f"{name}.png"
+                layer_path = layer_dir / f"{name}-{VISUAL_VERSION}.png"
                 layer_path.write_bytes(content)
                 local_index_image_paths[name] = str(layer_path)
+                current_visual_paths[name] = str(layer_path)
+                visual_versions[name] = VISUAL_VERSION
             for name, message in visual_errors.items():
                 logger.warning("satellite_index_image_failed", index=name, error=message)
             if visual_errors:
                 phase_errors.append(
                     "Capas visuales: " + ", ".join(f"{name} ({message})" for name, message in visual_errors.items())
                 )
-            visual_layers_ready = len(local_index_image_paths) == len(INDEX_NAMES)
+            visual_layers_ready = len(current_visual_paths) == len(INDEX_NAMES)
 
         processing_error = " | ".join(phase_errors) or None
         if image_ready and statistics_ready and visual_layers_ready:
@@ -2114,12 +2209,15 @@ async def sync_satellite_for_station(
     row.raw_payload = {
         **existing_raw,
         "scene_id": selected_feature.get("id"),
+        "processing_geometry": geometry,
         "feature": selected_feature,
         "geometry_mode": "polygon" if _polygon_geometry(plot.geojson) else "point_buffer_approximation",
         "processing_status": processing_status,
         "processing_error": processing_error,
         "local_image_path": local_image_path,
         "local_index_image_paths": local_index_image_paths,
+        "index_visual_versions": visual_versions,
+        "visual_grid": _visual_grid(geometry) if current_visual_paths else existing_raw.get("visual_grid"),
         "preview_url": preview_url,
         "statistics": statistics,
         "indices": indices,
@@ -2258,7 +2356,7 @@ async def test_copernicus_integration(
                 Station.influence_geojson.is_not(None),
                 (Station.latitude.is_not(None) & Station.longitude.is_not(None)),
             )
-        ).order_by(case((Station.code == "RAUL-PENA", 0), else_=1), Station.updated_at.desc()).limit(1)
+        ).order_by(Station.name, Station.id).limit(1)
     station = await db.scalar(station_query)
     if not station:
         return {
@@ -2483,4 +2581,3 @@ async def test_copernicus_integration(
         "fallback_used": selected_rank > 1,
         "diagnostics": diagnostics,
     }
-

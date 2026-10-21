@@ -8,11 +8,36 @@ from app.core.config import settings
 from app.db.models import AIAgent, AIAgentVersion, Crop
 
 AGENT_PURPOSES = {
+    "ORCHESTRATOR": "Orquestador de parcela",
+    "RAG_CROP": "Conocimiento agronómico por cultivo",
+    "PDF_REPORT": "Informes PDF de parcela",
+    "WEATHER_ANALYSIS": "Interpretación de datos meteorológicos",
+    "ALERT_ANALYSIS": "Interpretación de alertas",
+    "DISEASE_ANALYSIS": "Enfermedades posibles",
+    "FORECAST_ANALYSIS": "Pronóstico y tendencia estadística",
+    "CROP_CHAT": "Chat contextual de parcela",
     "CROP_ANALYSIS": "Criterio general para productores",
     "SATELLITE_ANALYSIS": "Análisis de Copernicus y geozona",
     "PHENOLOGY_ANALYSIS": "Análisis ambiental desde la siembra",
     "YEAR_COMPARISON": "Comparación con el mismo periodo del año anterior",
     "DAILY_DIGEST": "Boletín automático de 72 horas",
+}
+
+AGENT_CATEGORIES = {
+    'RAG_CROP': 'AGRO', 'CROP_ANALYSIS': 'AGRO', 'ALERT_ANALYSIS': 'AGRO',
+    'DISEASE_ANALYSIS': 'AGRO', 'PHENOLOGY_ANALYSIS': 'AGRO',
+    'WEATHER_ANALYSIS': 'DATOS', 'FORECAST_ANALYSIS': 'DATOS',
+    'PDF_REPORT': 'ACADEMICO', 'SATELLITE_ANALYSIS': 'GIS',
+    'DAILY_DIGEST': 'NOTIFICADOR', 'ORCHESTRATOR': 'ORQUESTADOR', 'CROP_CHAT': 'CHAT',
+    'YEAR_COMPARISON': 'DATOS',
+}
+CATEGORY_LABELS = {'AGRO':'Agente agro','DATOS':'Agente de datos','ACADEMICO':'Agente académico','GIS':'Agente GIS','NOTIFICADOR':'Agente notificador','ORQUESTADOR':'Agente orquestador','CHAT':'Agente chat'}
+DEFAULT_PARCEL_PURPOSES = ("RAG_CROP",)
+SHARED_PARCEL_PURPOSES = ("WEATHER_ANALYSIS", "SATELLITE_ANALYSIS", "ORCHESTRATOR", "CROP_CHAT")
+PURPOSE_THEMES = {
+    "ALERT_ANALYSIS": "RAG_CROP", "PHENOLOGY_ANALYSIS": "RAG_CROP",
+    "DISEASE_ANALYSIS": "RAG_CROP", "CROP_ANALYSIS": "RAG_CROP",
+    "FORECAST_ANALYSIS": "WEATHER_ANALYSIS", "YEAR_COMPARISON": "WEATHER_ANALYSIS",
 }
 
 _RESPONSE_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -249,6 +274,7 @@ CONTROL DE ESTRUCTURA DEL WIDGET:
 def default_agent_prompt(crop_name: str, purpose: str = "CROP_ANALYSIS") -> str:
     common = (
         f"Eres un agente agrometeorológico especializado en {crop_name} para productores de Paraguay. "
+        "Nunca realices cálculos matemáticos. Usa exclusivamente cifras precalculadas en Python. "
         "Recibes datos meteorológicos ya procesados, reglas determinísticas publicadas, etapa fenológica, "
         "pronóstico, evidencia satelital y fragmentos documentales recuperados. No cambies el nivel de alerta, "
         "los valores observados ni las reglas. Distingue hechos observados, proyecciones y limitaciones. "
@@ -256,6 +282,18 @@ def default_agent_prompt(crop_name: str, purpose: str = "CROP_ANALYSIS") -> str:
         "Cuando uses una fuente documental, cítala por título y página o sección únicamente si la configuración "
         "de respuesta solicita mostrar fuentes."
     )
+    roles = {
+        'ORCHESTRATOR': 'Eres el agente que traduce los análisis a decisiones sencillas para el productor. Resume solo el período seleccionado y lo que conviene revisar hoy, basándote en los especialistas disponibles. Nunca inventes evidencia.',
+        'RAG_CROP': 'Eres el experto agro del cultivo. Fundamenta riesgos y acciones en los fragmentos RAG suministrados, clima calculado y etapa estimada; cita documentos disponibles y declara falta de evidencia.',
+        'WEATHER_ANALYSIS': 'Explica en palabras corrientes cómo está el tiempo según las últimas lecturas, qué cambió y qué debe observar el productor. Usa solamente el período consultado.',
+        'ALERT_ANALYSIS': 'Explica en palabras cotidianas el nivel de atención y la primera acción recomendada para el período consultado. No menciones reglas internas, umbrales ni cálculos.',
+        'DISEASE_ANALYSIS': 'Cruza fenología, reglas meteorológicas, evidencia satelital y RAG. Describe enfermedades posibles como hipótesis y qué inspeccionar, sin confirmar diagnósticos.',
+        'FORECAST_ANALYSIS': 'Explica los tres días precalculados, distinguiendo API meteorológica de regresión histórica. No extrapoles ni calcules nuevos valores.',
+        'PDF_REPORT': 'Eres el agente académico. Redacta informes sobre el análisis persistido y sus fuentes, respetando la plantilla de informe configurada.',
+        'CROP_CHAT': 'Conversa como en un chat cotidiano. Contesta la última pregunta de forma breve y útil, tomando en cuenta fotos y el período seleccionado. No repitas los widgets ni utilices tecnicismos.',
+    }
+    if purpose in roles:
+        return common + ' ' + roles[purpose]
     if purpose == "SATELLITE_ANALYSIS":
         return common + (
             " Tu función específica es interpretar la geozona Copernicus: imagen RGB, NDVI, NDMI, NDWI, "

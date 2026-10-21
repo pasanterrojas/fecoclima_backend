@@ -157,6 +157,22 @@ async def _cleanup_files() -> dict[str, Any]:
 
 async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
     payload = job.payload or {}
+    if job.job_type == "PLOT_ALERT_MONITOR":
+        from app.services.plot_alerts import monitor_plot_rules
+        return await monitor_plot_rules(db)
+    if job.job_type == "PLOT_ALERT_DISPATCH":
+        from app.services.plot_alerts import dispatch_plot_alerts
+        return await dispatch_plot_alerts(db)
+    if job.job_type == "PLOT_SATELLITE_SYNC":
+        from app.db.models import Plot
+        from app.services.plot_satellite import sync_plot_satellite
+        plot = await db.get(Plot, payload["plot_id"])
+        if not plot or not plot.active or plot.deleted_at:
+            raise ValueError("Parcela no disponible")
+        return await sync_plot_satellite(db, plot)
+    if job.job_type == "PLOT_REPORT":
+        from app.services.plot_reporting import generate_plot_report
+        return await generate_plot_report(db, payload["report_id"])
     if job.job_type == "STATION_SYNC":
         date_from = date.fromisoformat(payload["date_from"])
         date_to = date.fromisoformat(payload["date_to"])
@@ -214,6 +230,16 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             date.fromisoformat(payload["date_to"]),
             float(payload.get("max_cloud_percentage", 40)),
         )
+    if job.job_type == "NOTIFICATION_EVENT_SINGLE":
+        from app.db.models import NotificationEvent
+        from app.services.notification_events import evaluate_event
+        event = await db.get(NotificationEvent, payload['event_id'])
+        if not event or not event.active:
+            return {'status':'SKIPPED','reason':'event_disabled'}
+        return await evaluate_event(db,event,force=True)
+    if job.job_type == "NOTIFICATION_EVENT_EVALUATE":
+        from app.services.notification_events import process_scheduled_events
+        return await process_scheduled_events(db)
     if job.job_type == "DAILY_PRODUCER_DIGEST":
         return await generate_daily_digest(db, force=bool(payload.get("force")))
     if job.job_type == "DATABASE_BACKUP":

@@ -110,7 +110,7 @@ async def test_integration(integration_id: uuid.UUID, db: DbSession, _: AdminUse
                         Station.deleted_at.is_(None),
                         Station.latitude.is_not(None),
                         Station.longitude.is_not(None),
-                    ).order_by(case((Station.code == "RAUL-PENA", 0), else_=1), Station.updated_at.desc()).limit(1)
+                    ).order_by(Station.name, Station.id).limit(1)
                 )
             if not station:
                 raise ValueError("No existe una estación activa con coordenadas")
@@ -203,3 +203,11 @@ async def delete_integration(integration_id: uuid.UUID, request: Request, db: Db
     row.active = False; row.deleted_at = datetime.now(UTC)
     await write_audit(db, action="INTEGRATION_DELETE", user=actor, request=request, entity_type="integration", entity_id=str(row.id))
     await db.commit(); return {"ok": True}
+
+
+@router.get("/{integration_id}")
+async def get_integration(integration_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    row = await db.get(IntegrationConfig, integration_id)
+    if not row or row.deleted_at:
+        raise HTTPException(status_code=404, detail="Integración no encontrada")
+    return _serialize(row)

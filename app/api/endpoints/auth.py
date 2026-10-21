@@ -8,7 +8,7 @@ import aiosmtplib
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, DbSession, require_csrf
+from app.api.deps import CurrentUser, DbSession, get_current_user, require_csrf
 from app.core.config import settings
 from app.core.security import (
     access_token,
@@ -28,9 +28,13 @@ router = APIRouter(prefix="/auth", tags=["Autenticación"])
 
 
 def _set_auth_cookies(response: Response, user: User, role_code: str) -> None:
+    # Remove the older narrow cookie, otherwise duplicate refresh cookies can
+    # survive login/rotation. The HttpOnly refresh cookie must reach SSR too.
+    if settings.auth_cookie_path != settings.cookie_path:
+        response.delete_cookie(settings.refresh_cookie_name, path=settings.auth_cookie_path, domain=settings.cookie_domain)
     common = {"secure": settings.cookie_secure, "samesite": "lax", "domain": settings.cookie_domain}
     response.set_cookie(settings.access_cookie_name, access_token(str(user.id), role_code, user.token_version), httponly=True, max_age=settings.access_token_minutes * 60, path=settings.cookie_path, **common)
-    response.set_cookie(settings.refresh_cookie_name, refresh_token(str(user.id), user.token_version), httponly=True, max_age=settings.refresh_token_days * 86400, path=settings.auth_cookie_path, **common)
+    response.set_cookie(settings.refresh_cookie_name, refresh_token(str(user.id), user.token_version), httponly=True, max_age=settings.refresh_token_days * 86400, path=settings.cookie_path, **common)
     response.set_cookie(settings.csrf_cookie_name, csrf_token(), httponly=False, max_age=settings.refresh_token_days * 86400, path=settings.cookie_path, **common)
 
 
@@ -74,6 +78,23 @@ async def me(user: CurrentUser, db: DbSession) -> dict:
     return await _user_response(db, user)
 
 
+@router.get("/session")
+async def session(request: Request, response: Response, db: DbSession) -> dict:
+    """Public session discovery; protected resources still require CurrentUser."""
+    response.headers["Cache-Control"] = "private, no-store"
+    user = None
+    if request.cookies.get(settings.access_cookie_name):
+        try:
+            user = await get_current_user(db, request)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+    return {
+        "user": await _user_response(db, user) if user else None,
+        "refresh_available": bool(request.cookies.get(settings.refresh_cookie_name)) if not user else False,
+    }
+
+
 @router.post("/refresh")
 async def refresh(response: Response, request: Request, db: DbSession) -> dict:
     token = request.cookies.get(settings.refresh_cookie_name)
@@ -97,6 +118,7 @@ async def logout(response: Response, request: Request, db: DbSession, user: Curr
     await db.commit()
     response.delete_cookie(settings.access_cookie_name, path=settings.cookie_path, domain=settings.cookie_domain)
     response.delete_cookie(settings.refresh_cookie_name, path=settings.auth_cookie_path, domain=settings.cookie_domain)
+    response.delete_cookie(settings.refresh_cookie_name, path=settings.cookie_path, domain=settings.cookie_domain)
     response.delete_cookie(settings.csrf_cookie_name, path=settings.cookie_path, domain=settings.cookie_domain)
     return {"ok": True}
 

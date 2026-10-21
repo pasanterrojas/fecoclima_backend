@@ -11,6 +11,7 @@ from app.db.models import SatelliteObservation
 from app.schemas.actions import PublicSatelliteMapProcessPayload, PublicSatelliteRefreshPayload
 from app.services.satellite import (
     _parse_output_statistics,
+    _bounded_statistics_resolution_m,
     _quality_acceptance,
     _statistics_quality,
     _statistics_resolution_degrees,
@@ -71,6 +72,19 @@ def test_statistics_resolution_converts_ten_metres_to_wgs84_degrees() -> None:
     assert 0.00008 < resy < 0.00010
     assert resx != 10
     assert resy != 10
+
+
+def test_large_station_area_uses_provider_safe_resolution() -> None:
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[-56.2, -27], [-54.2, -27], [-54.2, -25], [-56.2, -25], [-56.2, -27]]],
+    }
+    resolution_m = _bounded_statistics_resolution_m(geometry, 10)
+    resx, resy = _statistics_resolution_degrees(geometry, resolution_m)
+    assert resolution_m > 10
+    assert 2 / resx <= 1200
+    assert 2 / resy <= 1200
+    assert _bounded_statistics_resolution_m(_polygon(), 10) == 10
 
 
 def test_quality_rejects_one_pixel_grid_for_large_aoi() -> None:

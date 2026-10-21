@@ -81,6 +81,7 @@ class Station(Base, TimestampMixin, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(180), index=True)
     code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     external_guid: Mapped[str | None] = mapped_column(String(80), unique=True, nullable=True)
+    endpoint_url: Mapped[str | None] = mapped_column(String(1000))
     description: Mapped[str | None] = mapped_column(Text)
     country: Mapped[str] = mapped_column(String(80), default="Paraguay")
     department: Mapped[str | None] = mapped_column(String(120))
@@ -180,6 +181,7 @@ class Crop(Base, TimestampMixin, SoftDeleteMixin):
     code: Mapped[str] = mapped_column(String(30), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str | None] = mapped_column(Text)
+    planting_months: Mapped[list[int]] = mapped_column(JSONType, default=list, server_default="[]")
     rules_status: Mapped[str] = mapped_column(String(40), default="pending")
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
@@ -188,9 +190,14 @@ class Plot(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "plots"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(180), index=True)
+    map_color: Mapped[str] = mapped_column(String(7), default="#22a680", server_default="#22a680")
     producer_name: Mapped[str | None] = mapped_column(String(180))
+    producer_document: Mapped[str | None] = mapped_column(String(30))
+    browser_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    geometry_key: Mapped[str | None] = mapped_column(String(64), index=True)
     crop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crops.id", ondelete="SET NULL"), index=True)
-    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    station_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    planting_date: Mapped[date | None] = mapped_column(Date)
     area_ha: Mapped[float | None] = mapped_column(Numeric(12, 3))
     latitude: Mapped[float | None] = mapped_column(Float)
     longitude: Mapped[float | None] = mapped_column(Float)
@@ -285,6 +292,7 @@ class BaseCondition(Base, TimestampMixin, SoftDeleteMixin):
     threshold_max: Mapped[float | None] = mapped_column(Float)
     threshold_value: Mapped[float | None] = mapped_column(Float)
     unit: Mapped[str | None] = mapped_column(String(40))
+    soil_alternative: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     aggregation: Mapped[str] = mapped_column(String(50), default="average")
     required: Mapped[bool] = mapped_column(Boolean, default=True)
     order_index: Mapped[int] = mapped_column(Integer)
@@ -362,6 +370,8 @@ class AIAgentVersion(Base, TimestampMixin):
     version: Mapped[str] = mapped_column(String(40))
     system_prompt: Mapped[str] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(String(120))
+    provider: Mapped[str] = mapped_column(String(20), default="OPENAI", server_default="OPENAI")
+    html_template: Mapped[str | None] = mapped_column(Text)
     temperature: Mapped[float] = mapped_column(Float, default=0.2)
     max_tokens: Mapped[int] = mapped_column(Integer, default=1400)
     output_schema: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
@@ -489,6 +499,72 @@ class TelegramSubscriber(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("integration_id", "chat_id", name="uq_telegram_subscriber_chat"),
     )
+
+
+class EmailSubscription(Base, TimestampMixin):
+    """Consentimiento individual por correo, cultivo y estación."""
+    __tablename__ = "email_subscriptions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
+    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)
+    confirm_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    confirm_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manage_secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    telegram_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    __table_args__ = (UniqueConstraint("email", "crop_id", "station_id", name="uq_email_subscription_scope"),)
+
+
+class NotificationRequestLog(Base, TimestampMixin):
+    __tablename__ = "notification_request_logs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ip_digest: Mapped[str] = mapped_column(String(64), index=True)
+    email_digest: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class NotificationEvent(Base, TimestampMixin):
+    __tablename__ = "notification_events"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(180))
+    prompt: Mapped[str] = mapped_column(Text)
+    compiled_rule: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
+    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    timezone: Mapped[str] = mapped_column(String(80), default="America/Asuncion")
+    cadence: Mapped[str] = mapped_column(String(30), default="INTERVAL")
+    every_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    schedule_hour: Mapped[int] = mapped_column(Integer, default=8)
+    schedule_day: Mapped[int] = mapped_column(Integer, default=1)
+    schedule_months: Mapped[list[int]] = mapped_column(JSONType, default=list, server_default="[]")
+    schedule_date: Mapped[date | None] = mapped_column(Date)
+    channel: Mapped[str] = mapped_column(String(20), default="EMAIL")
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_match: Mapped[bool] = mapped_column(Boolean, default=False)
+    trigger_number: Mapped[int] = mapped_column(Integer, default=0)
+    last_status: Mapped[str | None] = mapped_column(String(30))
+    last_detail: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (Index("ix_notify_event_active_station", "active", "station_id"),)
+
+
+class NotificationEventDelivery(Base, TimestampMixin):
+    __tablename__ = "notification_event_deliveries"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notification_events.id", ondelete="CASCADE"), index=True)
+    subscription_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("email_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    channel: Mapped[str] = mapped_column(String(20))
+    destination_hint: Mapped[str] = mapped_column(String(255))
+    trigger_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="QUEUED")
+    error: Mapped[str | None] = mapped_column(Text)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("event_id", "subscription_id", "trigger_number", "channel", name="uq_notification_delivery_once"),)
 
 
 class SatelliteObservation(Base, TimestampMixin):
@@ -641,3 +717,69 @@ class DatabaseBackup(Base, TimestampMixin):
     restore_test_status: Mapped[str | None] = mapped_column(String(60))
     restore_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class PlotStation(Base, TimestampMixin):
+    """Geometric coverage; station_id on Plot is only the compatibility primary."""
+    __tablename__ = "plot_stations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    plot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plots.id", ondelete="CASCADE"), index=True)
+    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="CASCADE"), index=True)
+    coverage_pct: Mapped[float] = mapped_column(Float)
+    distance_m: Mapped[float] = mapped_column(Float)
+    __table_args__ = (UniqueConstraint("plot_id", "station_id", name="uq_plot_station"),)
+
+
+class PlotAnalysis(Base, TimestampMixin):
+    __tablename__ = "plot_analyses"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    plot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plots.id", ondelete="CASCADE"), index=True)
+    reference_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    context: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    agent_results: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class PlotConversation(Base, TimestampMixin):
+    __tablename__ = "plot_conversations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plot_analyses.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    browser_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    messages: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    __table_args__ = (UniqueConstraint("analysis_id", "user_id", "browser_session_id", name="uq_plot_conversation_browser"),)
+
+
+class PlotAlertRule(Base, TimestampMixin, SoftDeleteMixin):
+    __tablename__ = "plot_alert_rules"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    plot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plots.id", ondelete="CASCADE"), index=True)
+    natural_language: Mapped[str] = mapped_column(Text)
+    expression: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    channel: Mapped[str] = mapped_column(String(20))
+    recipient: Mapped[str] = mapped_column(String(255))
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=180)
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class PlotAlertDelivery(Base, TimestampMixin):
+    __tablename__ = "plot_alert_deliveries"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plot_alert_rules.id", ondelete="CASCADE"), index=True)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plot_analyses.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("rule_id", "analysis_id", name="uq_plot_alert_delivery"),)
+
+
+class PlotReport(Base, TimestampMixin):
+    __tablename__ = "plot_reports"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plot_analyses.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    storage_path: Mapped[str | None] = mapped_column(String(500))
+    error: Mapped[str | None] = mapped_column(Text)

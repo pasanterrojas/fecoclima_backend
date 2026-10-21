@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import case, func, select
@@ -12,7 +13,7 @@ from app.db.models import (
 )
 from app.schemas.resources import AgentPayload, CropPayload, PlotPayload, RulePayload
 from app.services.agent_defaults import (
-    AGENT_PURPOSES,
+    AGENT_PURPOSES, DEFAULT_PARCEL_PURPOSES, AGENT_CATEGORIES, CATEGORY_LABELS,
     build_default_agent,
     default_agent_prompt,
     merge_agent_output_schema,
@@ -22,6 +23,7 @@ from app.services.alert_engine import DEFAULT_ALERT_CONFIGURATION
 from app.services.ai import list_available_chat_models, test_chat_model
 from app.services.audit import write_audit
 from app.services.serialization import model_dict
+from app.services.crop_knowledge import sync_crop_knowledge
 
 router = APIRouter(tags=["Recursos agronómicos"])
 
@@ -68,11 +70,12 @@ async def create_crop(payload: CropPayload, request: Request, db: DbSession, act
     crop = Crop(**payload.model_dump(exclude={"code"}), code=code, rules_status="pending", created_by=actor.id)
     db.add(crop); await db.flush()
     created_agents = []
-    for purpose in AGENT_PURPOSES:
+    for purpose in DEFAULT_PARCEL_PURPOSES:
         agent, version = build_default_agent(crop, purpose=purpose, created_by=actor.id)
         db.add_all([agent, version])
         created_agents.append({"id": str(agent.id), "code": agent.code, "purpose": purpose})
     await db.flush()
+    await sync_crop_knowledge(db, crop.id)
     after = {**model_dict(crop, exclude={"deleted_at"}), "agents": created_agents}
     await _audit_commit(db, actor, request, "CROP_CREATE", "crop", crop.id, after=after)
     return after
@@ -102,23 +105,25 @@ async def delete_crop(crop_id: uuid.UUID, request: Request, db: DbSession, actor
 
 async def _plot_dict(db: DbSession, row: Plot) -> dict:
     crop = await db.get(Crop, row.crop_id) if row.crop_id else None
-    station = await db.get(Station, row.station_id)
+    station = await db.get(Station, row.station_id) if row.station_id else None
     return {**model_dict(row, exclude={"deleted_at"}), "crop_name": crop.name if crop else None, "station_name": station.name if station else None}
 
 
 @router.get("/plots")
 async def list_plots(db: DbSession, _: AnalystUser, limit: int = 100, offset: int = 0) -> dict:
-    rows = (await db.scalars(select(Plot).where(Plot.deleted_at.is_(None)).order_by(Plot.created_at.desc()).offset(offset).limit(min(limit, 250)))).all()
+    rows = (await db.scalars(select(Plot).where(Plot.deleted_at.is_(None), Plot.crop_id.is_not(None)).order_by(Plot.created_at.desc()).offset(offset).limit(min(limit, 250)))).all()
     return {"items": [await _plot_dict(db, row) for row in rows]}
 
 
 @router.post("/plots")
 async def create_plot(payload: PlotPayload, request: Request, db: DbSession, actor: AdminUser) -> dict:
-    if not await db.get(Station, payload.station_id):
-        raise HTTPException(status_code=400, detail="Estación inválida")
-    if payload.crop_id and not await db.get(Crop, payload.crop_id):
-        raise HTTPException(status_code=400, detail="Cultivo inválido")
-    plot = Plot(**payload.model_dump(), created_by=actor.id); db.add(plot); await db.flush()
+    from app.services.plot_configuration import configure_plot
+    plot = Plot(name=payload.name, created_by=actor.id)
+    db.add(plot)
+    try:
+        await configure_plot(db, plot, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     after = await _plot_dict(db, plot); await _audit_commit(db, actor, request, "PLOT_CREATE", "plot", plot.id, after=after)
     return after
 
@@ -128,9 +133,11 @@ async def update_plot(plot_id: uuid.UUID, payload: PlotPayload, request: Request
     plot = await db.get(Plot, plot_id)
     if not plot or plot.deleted_at: _not_found("Parcela")
     before = await _plot_dict(db, plot)
-    for key, value in payload.model_dump().items(): setattr(plot, key, value)
-    await db.flush()
-    await db.refresh(plot)
+    from app.services.plot_configuration import configure_plot
+    try:
+        await configure_plot(db, plot, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     after = await _plot_dict(db, plot)
     await _audit_commit(db, actor, request, "PLOT_UPDATE", "plot", plot.id, before, after)
     return after
@@ -186,11 +193,12 @@ async def _rule_dict(db: DbSession, rule: CropRuleVersion) -> dict:
 
 
 @router.get("/rules")
-async def list_rules(db: DbSession, _: AnalystUser, limit: int = 100, offset: int = 0) -> dict:
+async def list_rules(db: DbSession, _: AnalystUser, limit: int = 100, offset: int = 0, crop_id: uuid.UUID | None = None) -> dict:
     rows = (
         await db.execute(
             select(CropRuleVersion, Crop.name.label("crop_name"))
             .join(Crop, Crop.id == CropRuleVersion.crop_id)
+            .where(CropRuleVersion.crop_id == crop_id if crop_id else True)
             .order_by(CropRuleVersion.created_at.desc())
             .offset(offset)
             .limit(min(limit, 250))
@@ -332,7 +340,7 @@ async def _agent_dict(db: DbSession, agent: AIAgent) -> dict:
     crop = await db.get(Crop, agent.crop_id) if agent.crop_id else None
     version = await db.scalar(
         select(AIAgentVersion)
-        .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True))
+        .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.version == agent.current_version)
         .order_by(AIAgentVersion.created_at.desc())
         .limit(1)
     )
@@ -368,7 +376,10 @@ async def _agent_dict(db: DbSession, agent: AIAgent) -> dict:
     result = {
         **model_dict(agent, exclude={"deleted_at"}),
         "crop_name": crop.name if crop else "General",
+        "crop_scope": str(crop.id) if crop else "GENERAL",
         "purpose_label": AGENT_PURPOSES.get(agent.purpose or "", agent.purpose),
+        "category": AGENT_CATEGORIES.get(agent.purpose or "", "AGRO"),
+        "category_label": CATEGORY_LABELS.get(AGENT_CATEGORIES.get(agent.purpose or "", "AGRO")),
         "version": version.version if version else None,
         "documents_count": len(documents),
         "knowledge_documents": knowledge_documents,
@@ -378,10 +389,13 @@ async def _agent_dict(db: DbSession, agent: AIAgent) -> dict:
         result.update({
             "system_prompt": version.system_prompt,
             "model": version.model,
+            "provider": version.provider,
+            "html_template": version.html_template,
             "temperature": version.temperature,
             "max_tokens": version.max_tokens,
             "output_schema": version.output_schema,
             "rag_collection": version.rag_collection,
+            "allowed_widgets": (version.output_schema or {}).get("allowed_widgets", ["raw_data", "alerts", "phenology", "diagnosis", "satellite", "diseases", "forecast", "chat"]),
             "response_detail_level": response_policy["detail_level"],
             "response_max_words": response_policy["max_words"],
             "response_max_sections": response_policy["max_sections"],
@@ -406,9 +420,9 @@ async def list_agents(db: DbSession, _: AnalystUser, limit: int = 100, offset: i
 
 
 @router.get("/agents/model-options")
-async def agent_model_options(_: AnalystUser) -> dict:
+async def agent_model_options(_: AnalystUser, provider: Literal["OPENAI", "EDGE"] = "OPENAI") -> dict:
     """Modelos de texto visibles para la llave del proveedor configurado."""
-    return await list_available_chat_models()
+    return await list_available_chat_models(provider)
 
 
 @router.post("/agents/{agent_id}/test")
@@ -418,13 +432,13 @@ async def test_agent(agent_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
         _not_found("Agente")
     version = await db.scalar(
         select(AIAgentVersion)
-        .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True))
+        .where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.version == agent.current_version)
         .order_by(AIAgentVersion.created_at.desc())
         .limit(1)
     )
     if not version:
         raise HTTPException(status_code=409, detail="El agente no tiene una versión activa")
-    model = version.model or settings.ai_default_model
+    model = version.model or (settings.edge_ai_default_model if version.provider == "EDGE" else settings.ai_default_model)
     if not model:
         raise HTTPException(status_code=409, detail="El agente no tiene un modelo configurado")
     try:
@@ -432,6 +446,7 @@ async def test_agent(agent_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
             model,
             temperature=version.temperature,
             max_tokens=min(max(version.max_tokens, 100), 500),
+            provider=version.provider or "OPENAI",
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)[:4000]) from exc
@@ -476,10 +491,12 @@ async def create_agent(payload: AgentPayload, request: Request, db: DbSession, a
         version="1.0.0",
         system_prompt=payload.system_prompt or default_agent_prompt(crop_name, payload.purpose),
         model=payload.model,
+        provider=payload.provider,
+        html_template=payload.html_template,
         temperature=payload.temperature,
         max_tokens=payload.max_tokens,
         output_schema=merge_agent_output_schema(
-            payload.output_schema,
+            {**payload.output_schema, "allowed_widgets": payload.allowed_widgets},
             payload.purpose,
             _response_policy_overrides(payload),
         ),
@@ -488,6 +505,7 @@ async def create_agent(payload: AgentPayload, request: Request, db: DbSession, a
     ))
     await db.flush()
     await db.refresh(agent)
+    await sync_crop_knowledge(db, agent.crop_id, agent.id)
     after = await _agent_dict(db, agent)
     await _audit_commit(db, actor, request, "AGENT_CREATE", "ai_agent", agent.id, after=after)
     return after
@@ -521,40 +539,20 @@ async def update_agent(agent_id: uuid.UUID, payload: AgentPayload, request: Requ
     )
     if duplicate_code:
         raise HTTPException(status_code=409, detail="El código de agente ya existe")
-    incompatible_document = await db.scalar(
-        select(KnowledgeDocument)
-        .join(
-            AgentKnowledgeDocument,
-            AgentKnowledgeDocument.document_id == KnowledgeDocument.id,
-        )
-        .where(
-            AgentKnowledgeDocument.agent_id == agent.id,
-            KnowledgeDocument.crop_id.is_not(None),
-            KnowledgeDocument.crop_id != payload.crop_id,
-            KnowledgeDocument.deleted_at.is_(None),
-        )
-        .limit(1)
-    )
-    if incompatible_document:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Desvincule primero los documentos de otro cultivo antes de cambiar "
-                "el cultivo del agente"
-            ),
-        )
     for key in ["name", "crop_id", "description", "active"]:
         setattr(agent, key, getattr(payload, key))
     agent.purpose = payload.purpose
     agent.code = payload.code.upper()
-    version = await db.scalar(select(AIAgentVersion).where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.active.is_(True)).order_by(AIAgentVersion.created_at.desc()).limit(1))
+    version = await db.scalar(select(AIAgentVersion).where(AIAgentVersion.agent_id == agent.id, AIAgentVersion.version == agent.current_version).order_by(AIAgentVersion.created_at.desc()).limit(1))
     if version:
         version.system_prompt = payload.system_prompt or default_agent_prompt(crop.name if crop else "todos los cultivos", payload.purpose)
         version.model = payload.model
+        version.provider = payload.provider
+        version.html_template = payload.html_template
         version.temperature = payload.temperature
         version.max_tokens = payload.max_tokens
         version.output_schema = merge_agent_output_schema(
-            version.output_schema,
+            {**(version.output_schema or {}), **payload.output_schema, "allowed_widgets": payload.allowed_widgets},
             payload.purpose,
             _response_policy_overrides(payload),
         )
@@ -562,6 +560,7 @@ async def update_agent(agent_id: uuid.UUID, payload: AgentPayload, request: Requ
         version.active = payload.active
     await db.flush()
     await db.refresh(agent)
+    await sync_crop_knowledge(db, agent.crop_id, agent.id)
     after = await _agent_dict(db, agent)
     await _audit_commit(db, actor, request, "AGENT_UPDATE", "ai_agent", agent.id, before, after)
     return after
@@ -574,3 +573,139 @@ async def delete_agent(agent_id: uuid.UUID, request: Request, db: DbSession, act
     agent.active = False; agent.deleted_at = datetime.now(UTC)
     await _audit_commit(db, actor, request, "AGENT_DELETE", "ai_agent", agent.id)
     return {"ok": True}
+
+
+@router.get("/crops/{crop_id}")
+async def get_crop(crop_id: uuid.UUID, db: DbSession, _: AnalystUser) -> dict:
+    crop = await db.get(Crop, crop_id)
+    if not crop or crop.deleted_at: _not_found("Cultivo")
+    return model_dict(crop, exclude={"deleted_at"})
+
+
+@router.get("/agents/{agent_id}")
+async def get_agent(agent_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    agent = await db.get(AIAgent, agent_id)
+    if not agent or agent.deleted_at: _not_found("Agente")
+    return await _agent_dict(db, agent)
+
+
+def _agent_usage_integer(value) -> int:
+    """Accept recorded token counts only; malformed or missing usage is not estimated."""
+    from decimal import Decimal, InvalidOperation
+
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return 0
+    if not number.is_finite() or number < 0 or number != number.to_integral_value():
+        return 0
+    return int(number)
+
+
+def _agent_recorded_cost(value) -> float | None:
+    """Use an explicitly recorded USD amount, never infer a tariff from a model name."""
+    from decimal import Decimal, InvalidOperation
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite() or number < 0:
+        return None
+    converted = float(number)
+    if converted == float("inf"):
+        return None
+    return converted
+
+
+def _agent_activity_record(run, provider: str | None) -> dict:
+    """Allowlist activity metadata; prompts, contexts and provider error bodies stay private."""
+    payload = run.output_payload if isinstance(run.output_payload, dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    input_tokens = _agent_usage_integer(usage.get("input_tokens", usage.get("prompt_tokens")))
+    output_tokens = _agent_usage_integer(usage.get("output_tokens", usage.get("completion_tokens")))
+    total_tokens = _agent_usage_integer(usage.get("total_tokens")) or input_tokens + output_tokens
+    cost_value = usage.get("cost_usd")
+    if cost_value is None:
+        cost_value = payload.get("cost_usd")
+    return {
+        "id": str(run.id),
+        "created_at": run.created_at.isoformat(),
+        "status": run.status,
+        "model": run.model,
+        "provider": provider,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "usage_recorded": any(key in usage for key in (
+            "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
+        )),
+        "cost_usd": _agent_recorded_cost(cost_value),
+        "duration_ms": run.duration_ms if isinstance(run.duration_ms, int) and run.duration_ms >= 0 else None,
+    }
+
+
+def _agent_activity_payload(rows: list[tuple]) -> dict:
+    runs = [_agent_activity_record(run, provider) for run, provider in rows]
+    costs = [run["cost_usd"] for run in runs]
+    complete_cost = bool(costs) and all(value is not None for value in costs)
+    return {
+        "runs": runs,
+        "summary": {
+            "runs": len(runs),
+            "input_tokens": sum(run["input_tokens"] for run in runs),
+            "output_tokens": sum(run["output_tokens"] for run in runs),
+            "total_tokens": sum(run["total_tokens"] for run in runs),
+            "usage_reported_runs": sum(run["usage_recorded"] for run in runs),
+            "cost_usd": sum(costs) if complete_cost else None,
+            "cost_status": "known" if complete_cost else "not_configured",
+        },
+        "scope": {"kind": "latest_runs", "limit": 100, "summary": "returned_runs_only"},
+    }
+
+
+@router.get("/agents/{agent_id}/activity")
+async def get_agent_activity(agent_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    """Last 100 runs only, with their recorded usage and costs; not a lifetime billing total."""
+    from app.db.models import AIAgentRun
+
+    agent = await db.get(AIAgent, agent_id)
+    if not agent or agent.deleted_at:
+        _not_found("Agente")
+    result = await db.execute(
+        select(AIAgentRun, AIAgentVersion.provider)
+        .outerjoin(AIAgentVersion, AIAgentVersion.id == AIAgentRun.agent_version_id)
+        .where(AIAgentRun.agent_id == agent.id)
+        .order_by(AIAgentRun.created_at.desc(), AIAgentRun.id.desc())
+        .limit(100)
+    )
+    return _agent_activity_payload(list(result.all()))
+
+
+@router.get("/plots/{plot_id}")
+async def get_plot(plot_id: uuid.UUID, db: DbSession, _: AnalystUser) -> dict:
+    plot = await db.get(Plot, plot_id)
+    if not plot or plot.deleted_at: _not_found("Parcela")
+    return await _plot_dict(db, plot)
+
+
+@router.get("/plots/{plot_id}/satellite")
+async def get_plot_satellite(plot_id: uuid.UUID, db: DbSession, _: AnalystUser) -> dict | None:
+    from app.db.models import SatelliteObservation
+    from app.services.satellite import satellite_observation_payload
+    plot = await db.get(Plot, plot_id)
+    if not plot or plot.deleted_at: _not_found("Parcela")
+    observations = (await db.scalars(select(SatelliteObservation).where(
+        SatelliteObservation.plot_id == plot.id,
+        SatelliteObservation.provider == "COPERNICUS_DATA_SPACE_SENTINEL_2_L2A",
+    ).order_by(SatelliteObservation.captured_at.desc()))).all()
+    observation = next((row for row in observations if (row.raw_payload or {}).get("processing_geometry") == plot.geojson), None)
+    if not observation: return None
+    result = await satellite_observation_payload(db, observation, plot)
+    result["source_url"] = f"/parcels/{plot.id}/satellite/{observation.id}/image.jpg"
+    result["index_images"] = {name:f"/parcels/{plot.id}/satellite/{observation.id}/{name}.png" if path else None for name,path in result.get("index_images",{}).items()}
+    return result

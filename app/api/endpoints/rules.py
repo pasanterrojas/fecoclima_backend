@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.stage_codes import new_validation_errors
+
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -23,6 +25,7 @@ _VARIABLE_LABELS = {
     "rain_sum_mm": {"label": "Lluvia acumulada diaria", "unit": "mm"},
     "soil_temperature_avg_c": {"label": "Temperatura promedio del suelo", "unit": "°C"},
     "soil_moisture_avg_pct": {"label": "Humedad promedio del suelo", "unit": "%"},
+    "soil_tension_avg_cb": {"label": "Tensión del agua en el suelo", "unit": "cb"},
     "leaf_wetness_hours": {"label": "Horas de mojado foliar", "unit": "h"},
     "solar_sum_wm2_samples": {"label": "Radiación solar acumulada", "unit": "W/m²"},
     "evapotranspiration_sum_mm": {"label": "Evapotranspiración acumulada", "unit": "mm"},
@@ -106,6 +109,7 @@ async def update_condition(rule_id: UUID, condition_id: UUID, payload: BaseCondi
     row = await db.get(BaseCondition, condition_id)
     if not rule or not row or row.rule_version_id != rule.id or row.deleted_at:
         raise HTTPException(status_code=404, detail="Condición no encontrada")
+    baseline = await validate_rule_version(db, rule.id) if rule.status == "PUBLISHED" else None
     before = model_dict(row)
     for key, value in payload.model_dump().items():
         setattr(row, key, value)
@@ -114,16 +118,17 @@ async def update_condition(rule_id: UUID, condition_id: UUID, payload: BaseCondi
         rule.approved_at = datetime.now(UTC)
         await db.flush()
         validation = await validate_rule_version(db, rule.id)
-        if not validation["valid"]:
+        introduced_errors = new_validation_errors(baseline["errors"], validation["errors"])
+        if introduced_errors:
             await db.rollback()
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": "El valor no se aplicó porque dejaría inválida la regla publicada",
+                    "message": "El valor no se aplicó porque introduce errores nuevos en la regla publicada",
                     **validation,
                 },
             )
-    await write_audit(db, action="RULE_CONDITION_UPDATE", user=actor, request=request, entity_type="base_condition", entity_id=str(row.id), before=before, after=model_dict(row), extra={"rule_status": rule.status})
+    await write_audit(db, action="RULE_CONDITION_UPDATE", user=actor, request=request, entity_type="base_condition", entity_id=str(row.id), before=before, after=model_dict(row), extra={"rule_status": rule.status, "preexisting_validation_errors": baseline["errors"] if baseline else []})
     await db.commit()
     return model_dict(row, exclude={"deleted_at"})
 

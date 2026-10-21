@@ -5,15 +5,34 @@ from datetime import UTC, date, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from app.api.deps import AdminUser, AnalystUser, DbSession
+from app.api.deps import AdminUser, AnalystUser, DbSession, SuperAdminUser
 from app.db.models import BackgroundJob, IntegrationConfig, IntegrationLog, Station, WeatherReading
 from app.schemas.resources import StationPayload
 from app.services.audit import write_audit
 from app.services.jobs import enqueue_job
 from app.services.serialization import model_dict
 from app.services.satellite import ensure_station_plot
+from app.services.station_registration import generated_station_code
+from app.core.config import settings
+from app.services.geospatial import station_footprint
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/stations", tags=["Estaciones"])
+
+
+class StationLocationRequest(BaseModel):
+    location: str = Field(min_length=3, max_length=4096)
+
+
+@router.post("/location/resolve")
+async def resolve_location(payload: StationLocationRequest, _: AdminUser) -> dict:
+    from app.services.station_location import resolve_station_location
+    try:
+        return await resolve_station_location(payload.location)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="No se pudo consultar la ubicación. Pegue las coordenadas completas o ingréselas manualmente.") from exc
 
 
 async def _mark_copernicus_retest_required(db: DbSession, station: Station, detail: str) -> None:
@@ -53,15 +72,34 @@ async def _sync_station_geozone(db: DbSession, station: Station) -> None:
 @router.get("")
 async def list_stations(db: DbSession, _: AnalystUser, limit: int = 100, offset: int = 0) -> dict:
     rows = (await db.scalars(select(Station).where(Station.deleted_at.is_(None)).order_by(Station.name).offset(offset).limit(min(limit, 250)))).all()
-    return {"items": [model_dict(row, exclude={"deleted_at"}) for row in rows], "limit": limit, "offset": offset}
+    return {"items": [_station_record(station) for station in rows], "limit": limit, "offset": offset}
+
+
+def _station_record(station: Station) -> dict:
+    endpoint = station.endpoint_url
+    if not endpoint and station.external_guid:
+        endpoint = (f"{settings.fecoclima_base_url.rstrip('/')}/estacion/lectura-guid-por-periodo/"
+                    f"{station.external_guid}/{{year}}/{{month_from}}/{{month_to}}")
+    return {**model_dict(station, exclude={"deleted_at"}), "influence_area": station_footprint(station), "effective_endpoint_url": endpoint}
+
+
+@router.get("/{station_id}")
+async def get_station(station_id: uuid.UUID, db: DbSession, _: AnalystUser) -> dict:
+    station = await db.get(Station, station_id)
+    if not station or station.deleted_at:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    return _station_record(station)
 
 
 @router.post("")
 async def create_station(payload: StationPayload, request: Request, db: DbSession, actor: AdminUser) -> dict:
-    if await db.scalar(select(Station).where(Station.code == payload.code.upper(), Station.deleted_at.is_(None))):
+    code = payload.code or generated_station_code()
+    if await db.scalar(select(Station).where(Station.code == code)):
         raise HTTPException(status_code=409, detail="El código de estación ya existe")
+    if payload.external_guid and await db.scalar(select(Station).where(Station.external_guid == payload.external_guid)):
+        raise HTTPException(status_code=409, detail="El GUID externo ya pertenece a otra estación")
     data = payload.model_dump()
-    data["code"] = data["code"].upper()
+    data["code"] = code
     station = Station(**data, created_by=actor.id)
     db.add(station)
     await db.flush()
@@ -96,12 +134,15 @@ async def update_station(station_id: uuid.UUID, payload: StationPayload, request
     station = await db.get(Station, station_id)
     if not station or station.deleted_at:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
-    duplicate = await db.scalar(select(Station).where(Station.code == payload.code.upper(), Station.id != station.id, Station.deleted_at.is_(None)))
+    code = payload.code or station.code
+    duplicate = await db.scalar(select(Station).where(Station.code == code, Station.id != station.id))
     if duplicate:
         raise HTTPException(status_code=409, detail="El código de estación ya existe")
+    if payload.external_guid and await db.scalar(select(Station).where(Station.external_guid == payload.external_guid, Station.id != station.id)):
+        raise HTTPException(status_code=409, detail="El GUID externo ya pertenece a otra estación")
     before = model_dict(station, exclude={"deleted_at"})
     for key, value in payload.model_dump(include=payload.model_fields_set).items():
-        setattr(station, key, value.upper() if key == "code" else value)
+        setattr(station, key, code if key == "code" else value)
     await db.flush()
 
     # updated_at usa una expresión SQL onupdate. El flush expira ese atributo y
@@ -134,7 +175,7 @@ async def update_station(station_id: uuid.UUID, payload: StationPayload, request
 
 
 @router.delete("/{station_id}")
-async def delete_station(station_id: uuid.UUID, request: Request, db: DbSession, actor: AdminUser) -> dict:
+async def delete_station(station_id: uuid.UUID, request: Request, db: DbSession, actor: SuperAdminUser) -> dict:
     station = await db.get(Station, station_id)
     if not station or station.deleted_at:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
@@ -175,8 +216,9 @@ async def sync_station(station_id: uuid.UUID, db: DbSession, actor: AnalystUser,
 async def test_connection(station_id: uuid.UUID, db: DbSession, _: AnalystUser) -> dict:
     from app.services.fecoclima_adapter import FecoclimaAdapter
     station = await db.get(Station, station_id)
-    if not station or not station.external_guid:
-        raise HTTPException(status_code=400, detail="Estación sin GUID externo")
-    today = date.today()
-    rows = await FecoclimaAdapter().fetch_range(station.external_guid, today.replace(day=1), today)
+    if not station or station.deleted_at or station.source_type != "FECOCLIMA_API" or not station.external_guid:
+        raise HTTPException(status_code=400, detail="Seleccione una estación FECOCLIMA con GUID externo")
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(station.timezone or "America/Asuncion")).date()
+    rows = await FecoclimaAdapter(endpoint_url=station.endpoint_url).fetch_range(station.external_guid, today.replace(day=1), today, timezone=station.timezone)
     return {"ok": True, "records_received": len(rows), "latest_sample": rows[-1]["sampled_at"].isoformat() if rows else None}

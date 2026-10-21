@@ -4,16 +4,18 @@ import base64
 import json
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
+from pydantic import BaseModel, Field
 
 from app.api.deps import DbSession
 from app.schemas.actions import AgentAnalysisPayload, PhenologyAgentPayload
 from app.services.agent_runtime import chat_with_agent_for_alert, run_agent_for_alert
 from app.services.chat_report import generate_chat_report_pdf
 from app.services.phenology_agent import analyze_phenology_environment
+from app.services.widget_explanation import explain_widget
 
 router = APIRouter(prefix="/public/agent", tags=["Agente público por cultivo"])
 
@@ -26,8 +28,21 @@ _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _rate_windows: dict[str, deque[datetime]] = defaultdict(deque)
 
 
+class WidgetExplanationPayload(BaseModel):
+    alert_id: UUID
+    period: Literal["24h", "72h", "7d", "30d"] = "72h"
+    widget: Literal[
+        "alert", "phenology", "quality", "metric", "disease", "forecast",
+        "forecast_risk", "forecast_disease", "chart", "year_comparison", "satellite",
+    ]
+    item_key: str | None = Field(default=None, max_length=120)
+
+
 def _check_rate_limit(request: Request, *, limit: int = 12, window_seconds: int = 60) -> None:
-    key = request.client.host if request.client else "unknown"
+    host = request.client.host if request.client else "unknown"
+    route = request.scope.get("route")
+    operation = getattr(route, "path", None) or request.url.path
+    key = f"{host}:{operation}"
     now = datetime.now(UTC)
     window = _rate_windows[key]
     cutoff = now - timedelta(seconds=window_seconds)
@@ -99,6 +114,19 @@ async def analyze_with_crop_agent(
         force=payload.force,
     )
     return result
+
+
+@router.post("/explain-widget")
+async def explain_dashboard_widget(
+    payload: WidgetExplanationPayload,
+    request: Request,
+    db: DbSession,
+) -> dict[str, Any]:
+    _check_rate_limit(request, limit=12, window_seconds=60)
+    try:
+        return await explain_widget(db, payload.alert_id, payload.period, payload.widget, payload.item_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/satellite")
