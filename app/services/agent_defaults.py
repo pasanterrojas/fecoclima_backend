@@ -20,7 +20,7 @@ AGENT_PURPOSES = {
     "SATELLITE_ANALYSIS": "Análisis de Copernicus y geozona",
     "PHENOLOGY_ANALYSIS": "Análisis ambiental desde la siembra",
     "YEAR_COMPARISON": "Comparación con el mismo periodo del año anterior",
-    "DAILY_DIGEST": "Boletín automático de 72 horas",
+    "DAILY_DIGEST": "Redacción de avisos y alertas",
 }
 
 AGENT_CATEGORIES = {
@@ -315,8 +315,8 @@ def default_agent_prompt(crop_name: str, purpose: str = "CROP_ANALYSIS") -> str:
         )
     if purpose == "DAILY_DIGEST":
         return common + (
-            " Tu función específica es redactar un boletín diario de las últimas 72 horas, con situación actual, "
-            "alertas por reglas, pronóstico y recomendaciones generales."
+            " Tu función específica es redactar avisos de condiciones meteorológicas ya verificadas, con estaciones, fechas, "
+            "umbrales y recomendaciones de revisión en campo. Respeta el riesgo como posibilidad sin diagnosticar enfermedades."
         )
     return common + (
         " Tu función específica es entregar una recomendación práctica usando toda la consulta disponible. "
@@ -355,7 +355,7 @@ def build_default_agent(
         system_prompt=default_agent_prompt(crop.name, purpose),
         model=settings.ai_default_model,
         temperature=0.2,
-        max_tokens=1800 if purpose == "SATELLITE_ANALYSIS" else 1500,
+        max_tokens=4000 if purpose in {"ORCHESTRATOR", "WEATHER_ANALYSIS", "FORECAST_ANALYSIS"} else 1800 if purpose == "SATELLITE_ANALYSIS" else 1500,
         output_schema=merge_agent_output_schema({}, purpose),
         rag_collection=crop.code.upper(),
         allowed_rules=[],

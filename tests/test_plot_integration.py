@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -264,7 +265,8 @@ async def test_dual_soil_criterion_uses_station_unit_and_new_analysis_is_clean(s
     assert first['context']['selected_window_hours'] == hours
     assert len(first['context']['forecast']['days']) == 3
     assert [day['date'] for day in first['context']['forecast']['days']] == [
-        (datetime.now(UTC).date() + timedelta(days=offset)).isoformat() for offset in (1, 2, 3)
+        (datetime.fromisoformat(first['reference_at']).astimezone(ZoneInfo(station.timezone)).date()
+         + timedelta(days=offset)).isoformat() for offset in (1, 2, 3)
     ]
     assert evaluate.call_count == 1  # One station, only the requested rule evaluation.
     assert evaluate.call_args.args[0]['hours'] == hours

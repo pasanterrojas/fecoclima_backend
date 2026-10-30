@@ -62,4 +62,5 @@ def test_preserve_format_in_parcel_interpretation():
     raw = "**Situación**\n\n- Lluvia 5 mm\n- Suelo: sin dato"
     result = compact_widget_result({"markdown": raw}, "ORCHESTRATOR", limit=1500, preserve_format=True)
     assert result["markdown"] == raw
-    assert len(result["markdown"]) <= result["max_characters"]
+    # The synthesis, reports and chat preserve complete answers.
+    assert "max_characters" not in result

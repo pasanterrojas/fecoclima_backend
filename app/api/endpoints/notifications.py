@@ -164,13 +164,7 @@ async def update_settings(
 
 @router.post("/run-now")
 async def run_now(db: DbSession, _: AdminUser) -> dict:
-    job = await enqueue_unique(
-        db,
-        "DAILY_PRODUCER_DIGEST",
-        {"force": True, "requested_at": datetime.now(UTC).replace(second=0, microsecond=0).isoformat()},
-        priority=15,
-    )
-    return {"queued": bool(job), "job_id": str(job.id) if job else None}
+    raise HTTPException(410, detail='El boletín diario fue reemplazado por Avisos y alertas.')
 
 
 @router.post("/test-email")
@@ -321,3 +315,86 @@ async def notification_logs(db: DbSession, _: AdminUser, limit: int = 50) -> dic
         ).all()
     )
     return {"items": [model_dict(item) for item in rows]}
+
+# Single configuration surface for condition-based alerts. Legacy digest routes
+# remain readable for existing clients, but no longer schedule or send digests.
+from pydantic import BaseModel, Field, model_validator
+from app.core.config import settings as app_settings
+from app.db.models import AIAgent, AIAgentVersion
+from app.services.agent_runtime import select_agent_version
+
+NOTIFIER_PROMPT = '''Eres el agente notificador de FECOCLIMA IA. Redacta avisos breves y claros para productores cuando se cumplan las condiciones verificadas de una alerta.
+Comienza con el nombre de la alerta y explica qué ocurrió, en qué estaciones y a qué fecha corresponden los datos. Resume los umbrales y el tiempo comprobado. Explica el riesgo como una posibilidad, sin diagnosticar enfermedades. Indica qué observar en campo y cuándo consultar al técnico. Usa exclusivamente los datos suministrados; declara las limitaciones. Devuelve Markdown apto para convertirlo en correo HTML y mensaje de Telegram, con un máximo de 350 palabras. No incluyas destinatarios ni enlaces externos. La condición del prompt de la alerta define cuándo avisar; estas instrucciones definen el contenido del aviso.'''
+
+
+class NotificationControlInput(BaseModel):
+    active: bool = False
+    email_enabled: bool = False
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = Field(default=None, max_length=300)
+    notifier_prompt: str = Field(min_length=30, max_length=12000)
+
+    @model_validator(mode='after')
+    def enabled_channels(self):
+        if self.active and not (self.email_enabled or self.telegram_enabled):
+            raise ValueError('Habilite al menos un canal antes de activar el servicio.')
+        return self
+
+
+@router.get('/control')
+async def notification_control(db: DbSession, _: AdminUser) -> dict:
+    row = await get_notification_integration(db)
+    config = row.non_sensitive_config or {} if row else {}
+    agent, version = await select_agent_version(db, None, 'DAILY_DIGEST')
+    return {'active': bool(row and row.active and config.get('active')),
+            'email_enabled': bool(config.get('email_enabled')),
+            'telegram_enabled': bool(config.get('telegram_enabled')),
+            'has_telegram_token': bool(telegram_bot_token(row)),
+            'telegram_bot_username': config.get('telegram_bot_username'),
+            'notifier_prompt': version.system_prompt if version else NOTIFIER_PROMPT,
+            'notifier_agent_id': str(agent.id) if agent else None,
+            'smtp_ready': bool(app_settings.smtp_host and app_settings.smtp_from != 'no-reply@example.com'),
+            'smtp_from': app_settings.smtp_from,
+            'public_url': app_settings.frontend_base_url.rstrip('/') + '/suscripciones',
+            'checks_every_minutes': 1}
+
+
+@router.put('/control')
+async def save_notification_control(payload: NotificationControlInput, request: Request, db: DbSession, actor: AdminUser) -> dict:
+    row = await get_notification_integration(db, create=True)
+    config = dict(row.non_sensitive_config or {})
+    old_token = telegram_bot_token(row)
+    token = (payload.telegram_bot_token or '').strip()
+    if payload.telegram_enabled and not (token or old_token):
+        raise HTTPException(422, detail='Agregue el token de BotFather para habilitar Telegram.')
+    if token:
+        bot = await _verify_bot(token)
+        row.encrypted_secret = encrypt_secret(token)
+        row.secret_hint = token[-4:]
+        config.update(telegram_bot_username=bot['username'], telegram_bot_name=bot.get('first_name'), telegram_polling_initialized=True)
+        if token != old_token:
+            config['telegram_update_offset'] = 0
+            await db.execute(update(EmailSubscription).values(telegram_chat_id=None, telegram_active=False))
+            await db.execute(delete(TelegramSubscriber).where(TelegramSubscriber.integration_id == row.id))
+    config.update(active=payload.active, email_enabled=payload.email_enabled, telegram_enabled=payload.telegram_enabled, contexts=[], recipients=[])
+    row.non_sensitive_config = config
+    row.active = payload.active
+    # Keep the notifier in the existing agent CMS; publishing here versions its prompt.
+    agent, version = await select_agent_version(db, None, 'DAILY_DIGEST')
+    if not agent:
+        agent = await db.scalar(select(AIAgent).where(AIAgent.code == 'AGENT_GLOBAL_NOTIFIER'))
+        if not agent:
+            agent = AIAgent(name='Agente notificador', code='AGENT_GLOBAL_NOTIFIER', purpose='DAILY_DIGEST', crop_id=None, active=True, current_version='1.0.0', created_by=actor.id)
+            db.add(agent); await db.flush()
+        agent.active = True; agent.deleted_at = None
+    if not version or version.system_prompt != payload.notifier_prompt:
+        number = datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')
+        new_version = AIAgentVersion(agent_id=agent.id, version=number, system_prompt=payload.notifier_prompt,
+            model=version.model if version else app_settings.ai_default_model,
+            provider=version.provider if version else 'OPENAI', temperature=version.temperature if version else 0.2,
+            max_tokens=version.max_tokens if version else 2000, active=True)
+        db.add(new_version); agent.current_version = number
+    await write_audit(db, action='NOTIFICATION_CONTROL_UPDATED', user=actor, request=request, entity_type='integration', entity_id=str(row.id),
+                      after={'active':payload.active, 'email_enabled':payload.email_enabled, 'telegram_enabled':payload.telegram_enabled, 'notifier_agent_id':str(agent.id)})
+    await db.commit()
+    return await notification_control(db, actor)

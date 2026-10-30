@@ -124,7 +124,7 @@ async def test_preview_media_tokens_are_scoped_and_revoked_when_promoted(imagery
                 "index_images": {index_name: "local", "ndmi": None},
                 "index_visual_versions": {index_name: visual_version} if visual_version else {}}
 
-    monkeypatch.setattr(parcel_imagery, "satellite_observation_payload", image_payload)
+    monkeypatch.setattr('app.services.plot_satellite_context.satellite_observation_payload', image_payload)
     snapshot = (await client.get(f"{PREFIX}/{plot_id}")).json()
     url = snapshot["satellite"]["source_url"]
     token = parse_qs(urlsplit(url).query)["token"][0]

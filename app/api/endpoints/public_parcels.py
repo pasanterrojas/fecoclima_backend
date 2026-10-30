@@ -95,6 +95,11 @@ async def parcel_satellite_history(plot_id: UUID, db: DbSession, actor: PublicAc
     return public_payload(await parcels.parcel_satellite_history(plot_id=plot_id, db=db, actor=actor))
 
 
+@router.post('/{plot_id}/satellite/refresh')
+async def refresh_parcel_satellite(plot_id: UUID, request: Request, db: DbSession, actor: PublicActor) -> dict:
+    return public_payload(await parcels.refresh_parcel_satellite(plot_id=plot_id, request=request, db=db, actor=actor))
+
+
 @router.post('/analyses/{analysis_id}/satellite/sync')
 async def sync_analysis_satellite(analysis_id: UUID, db: DbSession, actor: PublicActor) -> dict:
     return public_payload(await parcels.sync_analysis_satellite(analysis_id=analysis_id, db=db, actor=actor))

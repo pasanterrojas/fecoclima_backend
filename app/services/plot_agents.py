@@ -9,14 +9,17 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AIAgentRun, PlotAnalysis
-from app.services.agent_defaults import default_agent_prompt, normalize_response_policy
+from app.services.agent_defaults import default_agent_prompt
 from app.services.agent_runtime import _knowledge_revision, select_agent_version
 from app.services.ai import generate_markdown_response, provider_fallback_reason
 from app.services.rag import retrieve_chunks
-from app.services.orchestrator_outputs import WIDGET_LABELS, permitted_widgets, parse_widget_outputs, render_widgets, fallback_widgets
-from app.services.chat_context import widget_context, conversation_observations
+from app.services.orchestrator_outputs import WIDGET_LABELS, permitted_widgets, render_widgets, fallback_widgets
+from app.services.chat_context import widget_context, conversation_observations, irrigation_fallback
 from app.services.widget_text import compact_widget_result
 from app.services.parcel_language import PARCEL_LANGUAGE_REVISION, parcel_language_instruction
+from app.services.parcel_guidance import (
+    field_review_candidate, guidance_response_contract, parse_guidance_response, satellite_plain_evidence,
+)
 
 PARCEL_PURPOSES = {
     "ORCHESTRATOR",
@@ -32,7 +35,7 @@ PARCEL_PURPOSES = {
     "CROP_CHAT",
 }
 QUESTIONS = {
-    "ORCHESTRATOR": "Sintetiza todos los widgets de la parcela y prioriza acciones observables en campo.",
+    "ORCHESTRATOR": "Explica qué está pasando en esta parcela, qué aporta la imagen seleccionada y qué hacer ahora. Relaciona las evidencias y prioriza decisiones concretas; sugiere visitar una ubicación solo si hay un motivo verificable.",
     "CROP_ANALYSIS": "Explica la situación de esta parcela y las acciones sugeridas para hoy.",
     "RAG_CROP": "Cruza clima, alertas calculadas, fenología, satélite y documentos del cultivo. Explica riesgos y posibles enfermedades como hipótesis y prioriza qué revisar en campo.",
     "PDF_REPORT": "Redacta el informe de esta parcela usando los resultados y las fuentes disponibles.",
@@ -78,6 +81,10 @@ def deterministic_summary(
     satellite = context.get("satellite") or {}
     radar = context.get("radar") or {}
     question_lower = (question or "").lower()
+    if purpose == "CROP_CHAT" and any(term in question_lower for term in (
+        "suelo", "riego", "regar", "regando", "seco", "seca", "tensión", "tension",
+    )):
+        return irrigation_fallback(context)
     conditions = [
         {**condition, "station": station.get("station_id")}
         for station in stations
@@ -208,6 +215,8 @@ def deterministic_summary(
         output.append("**Próximo paso:** continúe el monitoreo y revise de nuevo ante cambios del clima o el cultivo.")
     if question:
         output.insert(0, "**Respuesta según los datos disponibles**")
+    if purpose == "ORCHESTRATOR":
+        output.extend(["**Qué aporta la imagen**", satellite_plain_evidence(context)])
     return "\n\n".join(output)
 
 
@@ -266,6 +275,8 @@ async def interpret_plot(
     # involuntarias, incluso cuando un prompt persistido en CMS las solicite.
     context["windows"] = {str(window_hours): (context.get("windows") or {}).get(str(window_hours), {})}
     context["selected_window_hours"] = window_hours
+    if purpose == "CROP_CHAT":
+        context["chat_requested_at"] = datetime.now(UTC).isoformat()
     context["temporal_scope"] = {
         "observations": {"hours": window_hours, "ends_at": analysis.reference_at.isoformat()},
         "forecast": {"horizon_days": 3, "dates": [day["date"] for day in (context.get("forecast") or {}).get("days", [])]},
@@ -303,6 +314,26 @@ async def interpret_plot(
     context["allowed_widgets"] = allowed
     context["previous_widget_interpretations"] = widget_context(analysis.agent_results or {}, window_hours)
     context["previous_widget_interpretations"].pop(purpose, None)
+    if purpose == "ORCHESTRATOR":
+        selected_window = context["windows"][str(window_hours)]
+        context["parcel_fact_brief"] = {
+            "alert": {
+                "NINGUNA": "Las condiciones evaluadas no activaron una alerta; esto no descarta otros problemas.",
+                "MODERADA": "Se activó una alerta moderada según las condiciones evaluadas.",
+                "GRAVE": "Se activó una alerta grave según las condiciones evaluadas.",
+            }.get(selected_window.get("level"), "No se puede clasificar el riesgo con los datos disponibles; no equivale a ausencia de alerta."),
+            "satellite": satellite_plain_evidence(context),
+        }
+        context["field_review_candidate"] = field_review_candidate(context)
+        context.pop("inspection_point", None)
+        satellite_result = (analysis.agent_results or {}).get("SATELLITE_ANALYSIS") or {}
+        context["satellite_evidence_basis"] = {
+            "specialist_viewed_image": satellite_result.get("status") == "completed"
+            and satellite_result.get("window_hours") == window_hours
+            and satellite_result.get("view_mode", "producer") == view_mode
+            and bool(satellite_result.get("images_processed")),
+            "policy": "Los indicadores y promedios no describen lesiones ni localizan daños por sí solos.",
+        }
     if purpose == "CROP_CHAT":
         context["conversation_observations"] = conversation_observations(history)
         context["photo_context"] = {
@@ -324,6 +355,7 @@ async def interpret_plot(
         "version_id": str(version.id) if version else None,
         "version_updated_at": str(version.updated_at) if version else None,
         "images_processed": False,
+        "text_complete": True,
         "knowledge_revision": str(revision),
         "language_revision": PARCEL_LANGUAGE_REVISION,
         "allowed_widgets": context["allowed_widgets"],
@@ -362,10 +394,7 @@ async def interpret_plot(
                    "Responde la pregunta concreta. Máximo 300 palabras. " if purpose != "PDF_REPORT" else "")
                 + "\nREGLA DE PRIORIDAD MÁXIMA: Distingue siempre dos horizontes: las observaciones y alertas corresponden a las últimas " + str(window_hours) + " horas anteriores a reference_at; el pronóstico corresponde siempre a los PRÓXIMOS TRES DÍAS, no a esa ventana pasada. No nombres otras ventanas de observación. Contrasta el pronóstico Open-Meteo con la regresión histórica precalculada en Python cuando esté disponible, explicando coincidencias o diferencias sin calcular, combinar ni extrapolar cifras nuevas. La regresión usa su propio historial de días completos; no está limitada a las horas seleccionadas. Si falta pronóstico o historial suficiente, dilo y no lo inventes. Nunca presentes lluvia prevista como medida ni extrapolaciones como certezas. Nunca uses lenguaje de programación, nombres de variables, fórmulas, porcentajes de confianza ni jerga de sensores para un productor. Da primero la situación observada, luego lo esperado y una acción concreta. Una etapa de cultivo es estimada hasta verificarla en campo. Responde con párrafos naturales, no JSON."
                 + parcel_language_instruction(view_mode, purpose)
-                + ("\nCONTRATO DE SALIDA OBLIGATORIO: En esta síntesis devuelve únicamente un objeto JSON {\"widgets\":{clave:texto}}. "
-                   "Cada texto es una explicación en lenguaje natural. Solo se admiten las claves: " + ", ".join(allowed)
-                   + ". No agregues secciones fuera de esas claves. Este contrato prevalece sobre instrucciones de formato anteriores."
-                   if restricted else ""),
+                + (guidance_response_contract(allowed if restricted else None) if purpose == "ORCHESTRATOR" else ""),
                 context,
                 question or QUESTIONS.get(purpose, QUESTIONS["ORCHESTRATOR"]),
                 version.model,
@@ -373,18 +402,21 @@ async def interpret_plot(
                 image_data_urls=images,
                 temperature=version.temperature,
                 max_tokens=version.max_tokens,
-                response_policy=None if purpose == "CROP_CHAT" else normalize_response_policy(version.output_schema, purpose),
+                # Length is controlled by the writing prompt, never by slicing
+                # a completed explanation or dropping its final sections.
+                response_policy=None,
                 provider=version.provider or "OPENAI",
-                preserve_structured_output=restricted,
+                preserve_structured_output=purpose == "ORCHESTRATOR",
             )
             usage = generated.get("usage") or {}
             if not generated.get("fallback"):
-                if restricted:
-                    sections = parse_widget_outputs(generated["markdown"], allowed)
-                    result["widgets"] = sections
-                    generated["markdown"] = render_widgets(sections)
+                if purpose == "ORCHESTRATOR":
+                    guidance = parse_guidance_response(generated["markdown"], context, allowed if restricted else None)
+                    result.update(guidance)
+                    generated["markdown"] = guidance["markdown"]
                 result.update(
                     markdown=generated["markdown"],
+                    model=generated.get("model") or version.model,
                     status="completed",
                     fallback_reason=None,
                     images_processed=bool(images),

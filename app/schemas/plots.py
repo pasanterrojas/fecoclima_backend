@@ -22,6 +22,7 @@ class ParcelCoveragePayload(BaseModel):
 
 class ParcelAnalysisPayload(BaseModel):
     window_hours: Literal[60, 72, 96, 120] = 72
+    satellite_observation_id: UUID | None = None
 
 
 class PlotInterpretPayload(BaseModel):

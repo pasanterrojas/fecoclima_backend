@@ -2,17 +2,22 @@ from app.services.parcel_language import parcel_language_instruction
 from app.services.widget_text import compact_widget_result
 
 
-def test_producer_synthesis_requests_short_complete_actionable_language():
-    prompt = parcel_language_instruction('producer', 'ORCHESTRATOR')
-    assert '100 palabras' in prompt
-    assert '«Hoy»' in prompt and '«Qué hacer»' in prompt
-    assert 'no activaron una alerta' in prompt
-    assert 'No menciones determinista' in prompt
-    assert 'Termina la última oración' in prompt
+def test_synthesis_explains_the_parcel_and_actions_without_jargon_in_both_views():
+    for mode in ('producer', 'technical'):
+        prompt = parcel_language_instruction(mode, 'ORCHESTRATOR')
+        assert '180 a 320 palabras' in prompt
+        assert '«Qué está pasando»' in prompt and '«Qué aporta la imagen»' in prompt
+        assert '«Qué hacer ahora»' in prompt
+        assert 'no activaron una alerta' in prompt
+        assert 'No menciones determinista' in prompt
+        assert 'Termina la última oración' in prompt
+        assert 'qué resultado haría cambiar la decisión' in prompt
+        assert 'por norma general' in prompt
+        assert 'solo recibes promedios' in prompt
 
 
 def test_technical_and_report_keep_their_own_language():
-    assert parcel_language_instruction('technical', 'ORCHESTRATOR') == ''
+    assert parcel_language_instruction('technical', 'SATELLITE_ANALYSIS') == ''
     assert parcel_language_instruction('producer', 'PDF_REPORT') == ''
 
 

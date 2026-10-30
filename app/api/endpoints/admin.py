@@ -1,17 +1,117 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 from datetime import UTC, datetime, timedelta
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DbSession
-from app.db.models import Crop, Plot, AIAgent, AIAgentRun, AlertEvaluation, AuditLog, BackgroundJob, Report, Station, SystemSetting, User, WeatherReading
+from app.db.models import Crop, Plot, PlotAnalysis, SatelliteObservation, AIAgent, AIAgentRun, AlertEvaluation, AuditLog, BackgroundJob, Report, Station, SystemSetting, User, WeatherReading
 from app.schemas.resources import SettingPayload
 from app.services.audit import write_audit
 from app.services.serialization import model_dict
 
 router = APIRouter(tags=["Administración"])
+
+
+@router.get('/admin/parcel-history')
+async def parcel_history(
+    db: DbSession, _: AdminUser, search: str = Query('', max_length=180),
+    state: Literal['all', 'active', 'deleted', 'preview'] = 'all',
+    limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
+) -> dict:
+    """Persistent registry, including deleted parcels and exploratory polygons."""
+    query = select(Plot)
+    if search.strip():
+        match = f'%{search.strip()}%'
+        query = query.where(Plot.name.ilike(match) | Plot.producer_name.ilike(match) | Plot.producer_document.ilike(match))
+    if state == 'deleted':
+        query = query.where(Plot.deleted_at.is_not(None))
+    elif state == 'preview':
+        query = query.where(Plot.crop_id.is_(None), Plot.deleted_at.is_(None))
+    elif state == 'active':
+        query = query.where(Plot.active.is_(True), Plot.deleted_at.is_(None), Plot.crop_id.is_not(None))
+    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+    rows = (await db.scalars(query.order_by(Plot.created_at.desc(), Plot.id.desc()).offset(offset).limit(limit))).all()
+    counts = dict((await db.execute(select(SatelliteObservation.plot_id, func.count()).where(
+        SatelliteObservation.plot_id.in_([row.id for row in rows]),
+        SatelliteObservation.provider == 'COPERNICUS_DATA_SPACE_SENTINEL_2_L2A',
+    ).group_by(SatelliteObservation.plot_id))).all())
+    return {'items': [{**model_dict(row), 'scene_count': counts.get(row.id, 0)} for row in rows],
+            'total': total or 0, 'limit': limit, 'offset': offset}
+
+
+async def _archived_parcel(db: DbSession, plot_id: uuid.UUID) -> Plot:
+    plot = await db.get(Plot, plot_id)
+    if not plot:
+        raise HTTPException(404, 'Parcela no encontrada en el histórico')
+    return plot
+
+
+@router.get('/admin/parcel-history/{plot_id}')
+async def archived_parcel(plot_id: uuid.UUID, db: DbSession, _: AdminUser) -> dict:
+    return model_dict(await _archived_parcel(db, plot_id))
+
+
+@router.get('/admin/parcel-history/{plot_id}/images')
+async def archived_parcel_images(
+    plot_id: uuid.UUID, db: DbSession, _: AdminUser,
+    limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
+) -> dict:
+    """All stored optical scenes, including earlier polygon geometries and failed scenes.
+
+    Producer limits never prune these records or their downloaded files.
+    Analysis references identify which images actually supplied an AI snapshot.
+    """
+    from app.services.satellite import satellite_observation_payload, versioned_index_url
+
+    plot = await _archived_parcel(db, plot_id)
+    query = select(SatelliteObservation).where(
+        SatelliteObservation.plot_id == plot_id,
+        SatelliteObservation.provider == 'COPERNICUS_DATA_SPACE_SENTINEL_2_L2A',
+    )
+    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+    rows = (await db.scalars(query.order_by(SatelliteObservation.captured_at.desc(), SatelliteObservation.id.desc()).offset(offset).limit(limit))).all()
+    scene_ids = [str(row.id) for row in rows]
+    analysis_refs = (await db.execute(select(
+        PlotAnalysis.id, PlotAnalysis.context['satellite']['id'].as_string(),
+    ).where(PlotAnalysis.plot_id == plot_id, PlotAnalysis.context['satellite']['id'].as_string().in_(scene_ids)))).all()
+    items = []
+    for row in rows:
+        raw = row.raw_payload or {}
+        # Compute scene metadata against the polygon used at capture, without editing the parcel.
+        scene_plot = Plot(**{column.key: getattr(plot, column.key) for column in Plot.__table__.columns})
+        scene_plot.geojson = raw.get('processing_geometry') or plot.geojson
+        item = await satellite_observation_payload(db, row, scene_plot)
+        root = f'/admin/parcel-history/{plot_id}/images/{row.id}'
+        item['source_url'] = f'{root}/image.jpg' if item.get('image_available') else None
+        item['index_images'] = {name: versioned_index_url(root, name, item.get('index_visual_versions') or {}) if path else None
+                                for name, path in (item.get('index_images') or {}).items()}
+        item['processing_geometry'] = raw.get('processing_geometry')
+        item['used_in_analyses'] = [str(analysis_id) for analysis_id, scene_id in analysis_refs if scene_id == str(row.id)]
+        items.append(item)
+    return {'items': items, 'total': total or 0, 'limit': limit, 'offset': offset}
+
+
+@router.get('/admin/parcel-history/{plot_id}/images/{observation_id}/{layer}')
+async def archived_parcel_image(
+    plot_id: uuid.UUID, observation_id: uuid.UUID, layer: str, db: DbSession, _: AdminUser,
+    download: bool = False,
+) -> FileResponse:
+    from app.services.satellite import INDEX_NAMES, local_satellite_image_path, local_satellite_index_image_path
+
+    await _archived_parcel(db, plot_id)
+    row = await db.get(SatelliteObservation, observation_id)
+    if not row or row.plot_id != plot_id or layer not in {'image.jpg', *(f'{name}.png' for name in INDEX_NAMES)}:
+        raise HTTPException(404, 'Imagen no disponible')
+    path = local_satellite_image_path(row) if layer == 'image.jpg' else local_satellite_index_image_path(row, layer.removesuffix('.png'))
+    if not path:
+        raise HTTPException(404, 'Capa no disponible')
+    filename = f'{plot_id}-{row.captured_at.date()}-{row.id}-{layer}' if download else None
+    return FileResponse(path, media_type='image/jpeg' if layer == 'image.jpg' else 'image/png', filename=filename,
+                        headers={'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer'})
 
 
 @router.get("/admin/summary")

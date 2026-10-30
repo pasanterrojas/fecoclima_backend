@@ -135,14 +135,6 @@ async def main() -> None:
     )
     scheduler.add_job(schedule_cleanup, "cron", hour=3, minute=20, max_instances=1, coalesce=True)
     scheduler.add_job(
-        schedule_daily_digest,
-        "interval",
-        minutes=30,
-        max_instances=1,
-        coalesce=True,
-        next_run_time=datetime.now(UTC) + timedelta(seconds=45),
-    )
-    scheduler.add_job(
         poll_telegram_subscriptions,
         "interval",
         minutes=1,
@@ -158,12 +150,9 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
-    scheduler.add_job(schedule_notification_events, "interval", minutes=5,
+    scheduler.add_job(schedule_notification_events, "interval", minutes=1,
                       max_instances=1, coalesce=True,
                       next_run_time=datetime.now(UTC) + timedelta(seconds=90))
-    scheduler.add_job(schedule_plot_alerts, "interval", minutes=5,
-                      max_instances=1, coalesce=True,
-                      next_run_time=datetime.now(UTC) + timedelta(seconds=60))
     scheduler.start()
     logger.info(
         "scheduler_started",

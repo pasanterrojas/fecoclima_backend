@@ -1,4 +1,4 @@
-"""A presentation boundary for compact widget explanations, never for reports."""
+"""Compact labels separately from complete Markdown explanations."""
 from __future__ import annotations
 import html
 import re
@@ -29,11 +29,6 @@ def widget_summary(value: str | None, limit: int = WIDGET_CHARACTER_LIMIT) -> st
 
 
 def compact_widget_result(result: dict, purpose: str, *, limit: int = WIDGET_CHARACTER_LIMIT, preserve_format: bool = False) -> dict:
-    if purpose in {'PDF_REPORT', 'ORCHESTRATOR', 'CROP_CHAT'}:
-        return result
-    if preserve_format:
-        value = str(result.get('markdown') or '').strip()
-        if len(value) > limit:
-            value = value[:limit - 1].rsplit(' ', 1)[0].rstrip() + '…'
-        return {**result, 'markdown': value, 'max_characters': limit}
+    if preserve_format or purpose in {'PDF_REPORT', 'ORCHESTRATOR', 'CROP_CHAT'}:
+        return {key: value for key, value in result.items() if key != 'max_characters'}
     return {**result, 'markdown': widget_summary(result.get('markdown'), limit=limit), 'max_characters': limit}

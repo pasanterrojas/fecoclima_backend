@@ -187,7 +187,7 @@ async def telegram_request(
             try:
                 response = await client.post(url, json=payload or {})
             except httpx.RequestError as exc:
-                last_error = TelegramAPIError(f"Telegram: {type(exc).__name__}: {str(exc)[:500]}")
+                last_error = TelegramAPIError(f"Telegram: {type(exc).__name__}: {str(exc).replace(token, "[REDACTED]")[:500]}")
                 if attempt + 1 < attempts:
                     await asyncio.sleep(min(0.5 * (2**attempt), 4))
                     continue
@@ -340,11 +340,12 @@ async def process_telegram_update(
         match = re.fullmatch(r"fc_([a-f0-9]{32})_([a-f0-9]{24})", message_text.split(" ", 1)[1].strip())
         if match and chat["chat_type"] == "private":
             candidate = await db.get(EmailSubscription, UUID(hex=match.group(1)))
-            if candidate and candidate.status == "ACTIVE" and candidate.confirmed_at and compare_digest(
+            if candidate and candidate.status == "ACTIVE" and candidate.confirmed_at and candidate.telegram_enabled and compare_digest(
                 match.group(2), digest(f"tg:{candidate.id}:{candidate.manage_secret}")[:24]
             ):
                 candidate.telegram_chat_id = chat["chat_id"]
                 candidate.telegram_active = True
+                candidate.telegram_username = chat.get("username") or candidate.telegram_username
                 linked_email_subscription = candidate
     membership = update.get("my_chat_member") if isinstance(update.get("my_chat_member"), dict) else None
     new_status = str(((membership or {}).get("new_chat_member") or {}).get("status") or "")
@@ -353,6 +354,13 @@ async def process_telegram_update(
     action = "IGNORED"
 
     if command in {"/start", "/subscribe", "/suscribir"}:
+        if not linked_email_subscription:
+            linked_email_subscription = await db.scalar(select(EmailSubscription).where(
+                EmailSubscription.telegram_chat_id == chat['chat_id'],
+                EmailSubscription.status == 'ACTIVE', EmailSubscription.confirmed_at.is_not(None),
+                EmailSubscription.telegram_enabled.is_(True)).limit(1))
+            if linked_email_subscription:
+                linked_email_subscription.telegram_active = True
         if not subscriber:
             subscriber = TelegramSubscriber(integration_id=integration.id, chat_id=chat["chat_id"])
             db.add(subscriber)
@@ -361,18 +369,17 @@ async def process_telegram_update(
         subscriber.username = chat["username"]
         subscriber.first_name = chat["first_name"]
         subscriber.last_name = chat["last_name"]
-        subscriber.active = True
+        subscriber.active = bool(linked_email_subscription)
         subscriber.minimum_level = str((integration.non_sensitive_config or {}).get("telegram_minimum_level") or "MODERADA")
         subscriber.subscribed_at = now
         subscriber.unsubscribed_at = None
         subscriber.last_error = None
-        action = "SUBSCRIBED"
+        action = "SUBSCRIBED" if linked_email_subscription else "LINK_REQUIRED"
+        from app.services.notification_events import public_url
         response_text = (
-            ("✅ Telegram vinculado al cultivo y estación de su suscripción confirmada.\n" if linked_email_subscription else "") +
-            "✅ Suscripción activada. FECOCLIMA IA enviará como máximo un boletín diario "
-            f"cuando el nivel sea {subscriber.minimum_level.lower()} o superior.\n\n"
-            "Use /status para consultar el estado o /stop para cancelar.\n"
-            "La aplicación procesa las suscripciones automáticamente; no necesita compartir su Chat ID."
+            "✅ Telegram vinculado a su suscripción confirmada. Recibirá los avisos y alertas que correspondan a las condiciones observadas. Use /status para consultar el estado o /stop para dejar de recibir Telegram."
+            if linked_email_subscription else
+            "Para recibir avisos, inscríbase en la libreta de direcciones, elija Telegram y confirme su correo. Después abra el enlace de vinculación del bot: " + public_url('')
         )
     elif command in {"/stop", "/unsubscribe", "/salir"}:
         linked = (await db.scalars(select(EmailSubscription).where(EmailSubscription.telegram_chat_id == chat["chat_id"]))).all()
@@ -384,12 +391,12 @@ async def process_telegram_update(
         action = "UNSUBSCRIBED"
         response_text = "Suscripción desactivada. Puede volver a activarla con /start."
     elif command == "/status":
-        active = bool(subscriber and subscriber.active)
+        linked = await db.scalar(select(EmailSubscription).where(
+            EmailSubscription.telegram_chat_id == chat['chat_id'], EmailSubscription.status == 'ACTIVE',
+            EmailSubscription.confirmed_at.is_not(None), EmailSubscription.telegram_enabled.is_(True),
+            EmailSubscription.telegram_active.is_(True)).limit(1))
         action = "STATUS"
-        response_text = (
-            f"Estado: {'activo' if active else 'inactivo'}. "
-            + (f"Umbral: {subscriber.minimum_level}." if active and subscriber else "Use /start para suscribirse.")
-        )
+        response_text = "Estado: activo para avisos y alertas." if linked else "Estado: inactivo. Confirme su inscripción y use el enlace de vinculación de Telegram."
     elif new_status in {"kicked", "left"}:
         linked = (await db.scalars(select(EmailSubscription).where(EmailSubscription.telegram_chat_id == chat["chat_id"]))).all()
         for email_subscription in linked:

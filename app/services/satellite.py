@@ -1907,6 +1907,7 @@ async def sync_satellite_for_station(
     target_date: date | None = None,
     scene_id: str | None = None,
     plot_id: UUID | None = None,
+    before: datetime | None = None,
 ) -> dict[str, Any]:
     station = await db.get(Station, station_id) if station_id else None
     if station_id and (not station or station.deleted_at):
@@ -1927,7 +1928,7 @@ async def sync_satellite_for_station(
     latest_valid = await _latest_complete_observation(db, plot.id)
     if plot_id and latest_valid and (latest_valid.raw_payload or {}).get("processing_geometry") != plot.geojson:
         latest_valid = None
-    explicit_request = target_date is not None or scene_id is not None
+    explicit_request = target_date is not None or scene_id is not None or before is not None
     if (
         latest_valid
         and not force
@@ -1943,8 +1944,15 @@ async def sync_satellite_for_station(
             runtime=runtime,
         )
 
-    date_to = target_date or datetime.now(UTC).date()
-    date_from = target_date or (date_to - timedelta(days=runtime["lookback_days"]))
+    today = datetime.now(UTC).date()
+    # Historical retrieval must advance to an earlier acquisition DAY. The
+    # statistical and image products mosaic one full UTC day, not each tile.
+    date_to = target_date or ((before.date() - timedelta(days=1)) if before else today)
+    lookback = max(runtime['lookback_days'], runtime['history_days']) if before else runtime['lookback_days']
+    date_from = target_date or (today - timedelta(days=lookback))
+    if date_to < date_from:
+        return {'status': 'NO_SCENE', 'plot_id': str(plot.id), 'count': 0,
+                'date_from': date_from.isoformat(), 'date_to': date_to.isoformat()}
     geometry = plot_geometry(plot)
     catalog_result = await _search_copernicus_catalog_for_geometry(
         integration,
@@ -1955,6 +1963,8 @@ async def sync_satellite_for_station(
         runtime["catalog_limit"],
     )
     features = catalog_result["features"]
+    if before:
+        features = [feature for feature in features if _feature_datetime(feature).date() < before.date()]
     now = datetime.now(UTC)
     if not features:
         warning = "Copernicus no encontró escenas en el período configurado."

@@ -12,7 +12,7 @@ PROMPT = 'Cuando se cumpla humedad mayor a 85 % por más de 10 horas y una tempe
 def test_natural_language_compiles_every_clause():
     rule=compile_event_prompt(PROMPT)
     assert rule['operator']=='ALL'
-    assert rule['clauses']==[{'type':'humidity_above','threshold':85.0,'hours':10.0},{'type':'temperature_between','min':15.0,'max':25.0}]
+    assert rule['clauses']==[{'type':'humidity_above','threshold':85.0,'hours':10.0},{'type':'temperature_between','min':15.0,'max':25.0,'hours':10.0}]
 
 
 @pytest.mark.parametrize('prompt',[
@@ -83,3 +83,17 @@ def test_unsubscribe_link_cannot_be_tampered():
     token=manage_token(row)
     assert check_manage_token(row,token)
     assert not check_manage_token(row,token[:-1]+('1' if token[-1]!='1' else '2'))
+
+
+def test_temperature_must_hold_throughout_the_continuous_window():
+    now=datetime(2026,10,19,22,tzinfo=UTC)
+    readings=series(now)
+    readings[30].temperature_c=30
+    assert evaluate_readings(compile_event_prompt(PROMPT),readings,now,10)['state']=='FALSE'
+    readings[30].temperature_c=None
+    assert evaluate_readings(compile_event_prompt(PROMPT),readings,now,10)['state']=='UNKNOWN'
+
+
+def test_empty_rule_never_matches():
+    now=datetime(2026,10,19,22,tzinfo=UTC)
+    assert evaluate_readings({},series(now),now,10)['state']=='UNKNOWN'

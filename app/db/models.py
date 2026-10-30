@@ -502,12 +502,12 @@ class TelegramSubscriber(Base, TimestampMixin):
 
 
 class EmailSubscription(Base, TimestampMixin):
-    """Consentimiento individual por correo, cultivo y estación."""
+    """Libreta consentida con preferencias de canal y ámbitos heredados opcionales."""
     __tablename__ = "email_subscriptions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(255), index=True)
-    crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
-    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    crop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
+    station_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)
     confirm_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     confirm_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -517,7 +517,22 @@ class EmailSubscription(Base, TimestampMixin):
     last_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     telegram_chat_id: Mapped[str | None] = mapped_column(String(80), index=True)
     telegram_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    telegram_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    telegram_username: Mapped[str | None] = mapped_column(String(40))
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consent_version: Mapped[str | None] = mapped_column(String(40))
+    pending_changes: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, server_default="{}", nullable=False)
     __table_args__ = (UniqueConstraint("email", "crop_id", "station_id", name="uq_email_subscription_scope"),)
+
+
+class SubscriptionPlot(Base, TimestampMixin):
+    """A verified contact can follow multiple parcels, using its consented channels."""
+    __tablename__ = "subscription_plots"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    subscription_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("email_subscriptions.id", ondelete="CASCADE"), index=True)
+    plot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("plots.id", ondelete="CASCADE"), index=True)
+    __table_args__ = (UniqueConstraint("subscription_id", "plot_id", name="uq_subscription_plot"),)
 
 
 class NotificationRequestLog(Base, TimestampMixin):
@@ -530,14 +545,19 @@ class NotificationRequestLog(Base, TimestampMixin):
 class NotificationEvent(Base, TimestampMixin):
     __tablename__ = "notification_events"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    code: Mapped[str] = mapped_column(String(40), unique=True, default=lambda: "ALT-" + uuid4().hex[:16].upper())
+    station_states: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, server_default="{}")
     name: Mapped[str] = mapped_column(String(180))
     prompt: Mapped[str] = mapped_column(Text)
     compiled_rule: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    crop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
-    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
+    crop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("crops.id", ondelete="RESTRICT"), index=True)
+    station_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stations.id", ondelete="RESTRICT"), index=True)
     timezone: Mapped[str] = mapped_column(String(80), default="America/Asuncion")
     cadence: Mapped[str] = mapped_column(String(30), default="INTERVAL")
-    every_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    every_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    lookback_hours: Mapped[int] = mapped_column(Integer, default=72, server_default="72", nullable=False)
+    run_full_analysis: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    station_cursors: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, server_default="{}", nullable=False)
     schedule_hour: Mapped[int] = mapped_column(Integer, default=8)
     schedule_day: Mapped[int] = mapped_column(Integer, default=1)
     schedule_months: Mapped[list[int]] = mapped_column(JSONType, default=list, server_default="[]")
@@ -563,8 +583,23 @@ class NotificationEventDelivery(Base, TimestampMixin):
     trigger_number: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(30), default="QUEUED")
     error: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, server_default="{}")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("event_id", "subscription_id", "trigger_number", "channel", name="uq_notification_delivery_once"),)
+
+
+class NotificationEventRun(Base, TimestampMixin):
+    __tablename__ = "notification_event_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notification_events.id", ondelete="CASCADE"), index=True)
+    mode: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="QUEUED", index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class SatelliteObservation(Base, TimestampMixin):

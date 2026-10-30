@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import httpx
 import numpy as np
@@ -26,6 +28,47 @@ from app.services.satellite import (
     _search_copernicus_catalog_for_geometry,
     sync_satellite_for_station,
 )
+
+OPTICAL_HISTORY_LIMIT = 3
+
+
+async def sync_plot_optical_history(db: AsyncSession, plot: Plot) -> dict:
+    """Download the newest usable scene and two earlier, distinct UTC dates.
+
+    Each retrieval performs the usual polygon quality checks. A historical
+    request cannot fall back to the newest cached scene and count it twice.
+    Committed observations become visible while the rest is still processing.
+    """
+    latest = await sync_satellite_for_station(db, plot.station_id, plot_id=plot.id, crop_id=plot.crop_id, force=True)
+    scenes: list[dict] = []
+    candidate = latest
+    cursor = None
+    reason = None
+    for index in range(OPTICAL_HISTORY_LIMIT):
+        if index:
+            try:
+                candidate = await sync_satellite_for_station(
+                    db, plot.station_id, plot_id=plot.id, crop_id=plot.crop_id, before=cursor,
+                )
+            except Exception as exc:
+                await db.rollback()
+                reason = f'No se pudo completar la búsqueda histórica ({type(exc).__name__}).'
+                break
+        values = list((candidate.get('indices') or {}).values()) + [candidate.get('ndvi'), candidate.get('ndmi'), candidate.get('ndwi')]
+        has_values = any(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) for value in values)
+        has_image = candidate.get('image_available') or any((candidate.get('index_images') or {}).values())
+        if not candidate.get('observation_id') or not candidate.get('captured_at') or not has_values or not has_image:
+            reason = 'No se encontraron más escenas con indicadores válidos en el período configurado.'
+            break
+        captured = datetime.fromisoformat(candidate['captured_at'].replace('Z', '+00:00'))
+        if cursor and captured.date() >= cursor.date():
+            reason = 'Copernicus no devolvió una fecha anterior distinta.'
+            break
+        scenes.append({'observation_id': candidate['observation_id'], 'captured_at': candidate['captured_at']})
+        cursor = captured
+    return {**latest, 'history': scenes, 'history_count': len(scenes),
+            'history_status': 'COMPLETE' if len(scenes) == OPTICAL_HISTORY_LIMIT else 'PARTIAL',
+            'history_message': f'{len(scenes)} de {OPTICAL_HISTORY_LIMIT} escenas con indicadores disponibles.' + (f' {reason}' if reason else '')}
 
 NDVI_RASTER = """//VERSION=3
 function setup(){return {input:["B04","B08","SCL","dataMask"],output:{bands:1,sampleType:"FLOAT32"}};}
@@ -126,18 +169,13 @@ async def sync_plot_satellite(db: AsyncSession, plot: Plot) -> dict:
     await db.commit()
     results: dict[str, Any] = {}
     try:
-        results["sentinel_2"] = await sync_satellite_for_station(
-            db, plot.station_id, plot_id=plot.id, crop_id=plot.crop_id
-        )
-        observation = await db.scalar(
-            select(SatelliteObservation)
-            .where(
-                SatelliteObservation.plot_id == plot.id,
-                SatelliteObservation.provider == "COPERNICUS_DATA_SPACE_SENTINEL_2_L2A",
-            )
-            .order_by(SatelliteObservation.captured_at.desc())
-            .limit(1)
-        )
+        results["sentinel_2"] = await sync_plot_optical_history(db, plot)
+    except Exception as exc:
+        await db.rollback()
+        results["sentinel_2"] = {"status": "UNAVAILABLE", "reason": type(exc).__name__, "detail": "Revise los registros del servicio satelital"}
+    try:
+        identifier = results['sentinel_2'].get('observation_id')
+        observation = await db.get(SatelliteObservation, UUID(identifier)) if identifier else None
         if observation and not (observation.raw_payload or {}).get("inspection_point"):
             content = await _raster(
                 plot.geojson, observation.captured_at, radar=False, integration=await _integration(db)
@@ -158,7 +196,7 @@ async def sync_plot_satellite(db: AsyncSession, plot: Plot) -> dict:
             await db.commit()
     except Exception as exc:
         await db.rollback()
-        results["sentinel_2"] = {"status": "UNAVAILABLE", "reason": type(exc).__name__, "detail": "Revise los registros del servicio satelital"}
+        results["inspection_point"] = {"status": "UNAVAILABLE", "reason": type(exc).__name__}
     # Radar uses its own collection and bands: it is never presented as NDVI.
     try:
         integration = await _integration(db)

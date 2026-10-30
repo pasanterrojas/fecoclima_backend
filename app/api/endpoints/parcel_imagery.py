@@ -1,6 +1,5 @@
 """Session-scoped Sentinel previews, independent of crop and station coverage."""
 from datetime import UTC, datetime, timedelta
-import math
 from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -14,8 +13,9 @@ from app.schemas.plots import ParcelCoveragePayload
 from app.services.geospatial import validate_polygon, parcel_metrics
 from app.services.jobs import enqueue_unique
 from app.services.parcel_identity import geometry_key
-from app.services.satellite import satellite_observation_payload, local_satellite_image_path, local_satellite_index_image_path, versioned_index_url, INDEX_NAMES
+from app.services.satellite import local_satellite_image_path, local_satellite_index_image_path, versioned_index_url, INDEX_NAMES
 from app.services.spectral_palettes import VISUAL_VERSION
+from app.services.plot_satellite_context import plot_optical_history
 
 router=APIRouter(prefix="/public/parcel-imagery",tags=["Vista satelital por polígono"])
 
@@ -33,36 +33,38 @@ async def preview(db,plot_id:UUID,request:Request):
 
 
 async def snapshot(db: AsyncSession, plot: Plot) -> dict:
-    rows=(await db.scalars(select(SatelliteObservation).where(SatelliteObservation.plot_id==plot.id).order_by(SatelliteObservation.captured_at.desc()).limit(90))).all()
+    history = await plot_optical_history(db, plot)
     token=create_token(str(plot.id),"parcel_imagery",timedelta(hours=8))
-    history=[];radar=None
-    for row in rows:
-        raw=row.raw_payload or {}
-        if raw.get("processing_geometry")!=plot.geojson:continue
-        if row.provider=="COPERNICUS_SENTINEL_1_GRD":
-            if radar is None:radar={"captured_at":row.captured_at.isoformat(),"vv_mean":raw.get("vv_mean"),"vh_mean":raw.get("vh_mean"),"unit":"gamma0 lineal"}
-            continue
-        if row.provider!="COPERNICUS_DATA_SPACE_SENTINEL_2_L2A":continue
-        item=await satellite_observation_payload(db,row,plot)
-        if not item.get("image_available") and not any(item.get("index_images",{}).values()) and not any(
-            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-            for value in (item.get('indices') or {}).values() if value is not None
-        ):continue
-        root=f"/public/parcel-imagery/{plot.id}/images/{row.id}"
-        item["source_url"]=f"{root}/image.jpg?token={token}"
+    for item in history:
+        root=f"/public/parcel-imagery/{plot.id}/images/{item['id']}"
+        item["source_url"]=f"{root}/image.jpg?token={token}" if item.get("image_available") else None
         image_paths=item.get("index_images",{})
         item["index_images"]={}
         for key,path in image_paths.items():
             url=versioned_index_url(root,key,item.get("index_visual_versions") or {})
             item["index_images"][key]=f"{url}{'&' if '?' in url else '?'}token={token}" if path else None
-        history.append(item)
+    radar_row = await db.scalar(select(SatelliteObservation).where(
+        SatelliteObservation.plot_id == plot.id,
+        SatelliteObservation.provider == 'COPERNICUS_SENTINEL_1_GRD',
+        SatelliteObservation.raw_payload['processing_geometry'] == plot.geojson,
+    ).order_by(SatelliteObservation.captured_at.desc(), SatelliteObservation.id.desc()).limit(1))
+    raw = (radar_row.raw_payload or {}) if radar_row else {}
+    radar = {'captured_at': radar_row.captured_at.isoformat(), 'vv_mean': raw.get('vv_mean'),
+             'vh_mean': raw.get('vh_mean'), 'unit': 'gamma0 lineal'} if radar_row else None
     job=await db.scalar(select(BackgroundJob).where(BackgroundJob.job_type=="PLOT_SATELLITE_SYNC",BackgroundJob.payload=={"plot_id":str(plot.id)}).order_by(BackgroundJob.created_at.desc()).limit(1))
     pending=job and job.status in {"PENDING","RUNNING"}
-    return {"id":str(plot.id),"status":"PROCESSING" if pending else "AVAILABLE" if history else "NO_VALID_SCENE", "satellite":history[0] if history else None,"history":history,"radar":radar,"job_status":job.status if job else None,"area_ha":float(plot.area_ha or 0),"message":"Buscando y procesando escenas para su polígono." if pending else "Las imágenes corresponden al polígono; la cobertura meteorológica se consulta por separado." if history else "Aún no hay una escena válida procesada. Puede solicitar una nueva búsqueda; la disponibilidad depende de Copernicus."}
+    history_message = (((job.result or {}).get('sentinel_2') or {}).get('history_message')) if job else None
+    return {"id":str(plot.id),"status":"PROCESSING" if pending else "AVAILABLE" if history else "NO_VALID_SCENE",
+            "satellite":history[0] if history else None,"history":history,"radar":radar,
+            "history_count":len(history),"history_limit":3,"job_status":job.status if job else None,
+            "area_ha":float(plot.area_ha or 0),
+            "message":f"Buscando las 3 imágenes más recientes: {len(history)}/3 disponibles." if pending else
+                      history_message or f"{len(history)} de 3 imágenes con indicadores disponibles." if history else
+                      "Aún no hay una escena válida procesada. Puede solicitar una nueva búsqueda; la disponibilidad depende de Copernicus."}
 
 
 @router.post("")
-async def request_preview(payload:ParcelCoveragePayload,request:Request,db:DbSession)->dict:
+async def request_preview(payload:ParcelCoveragePayload,request:Request,db:DbSession,force:bool=False)->dict:
     from app.api.endpoints.agent_public import _check_rate_limit
     _check_rate_limit(request,limit=12,window_seconds=60)
     session=browser_id(request)
@@ -86,7 +88,7 @@ async def request_preview(payload:ParcelCoveragePayload,request:Request,db:DbSes
     versions = visual_result.get("index_visual_versions") or {}
     outdated = (recent and recent.status == "COMPLETED" and visual_result.get("visual_layers_available", 0)
                 and any(versions.get(name) != VISUAL_VERSION for name in INDEX_NAMES))
-    if not recent or failed or outdated:
+    if force or not recent or failed or outdated or (recent.status == "COMPLETED" and visual_result.get("history_count") is None):
         await enqueue_unique(db, "PLOT_SATELLITE_SYNC", {"plot_id": str(plot.id)}, priority=85)
     return await snapshot(db,plot)
 

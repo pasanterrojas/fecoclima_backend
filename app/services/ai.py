@@ -730,11 +730,24 @@ def _markdown_chat_payload(
     image_data_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    for item in (history or [])[-12:]:
+    # Keep recent dialogue within a character budget, including voice messages.
+    is_chat = context.get("agent_purpose") == "CROP_CHAT"
+    remaining = 32000 if is_chat else 48000
+    recent_messages = []
+    for item in reversed((history or [])[-40:] if is_chat else (history or [])[-12:]):
         role = item.get("role")
         content = str(item.get("content") or "").strip()
+        if role == "user" and item.get("transcription"):
+            content += "\nTranscripción del usuario: " + str(item["transcription"])[:5000]
+        if role == "assistant" and item.get("status") == "fallback":
+            content = "[Respuesta automática de respaldo sin IA; puede ser incompleta]\n" + content
         if role in {"user", "assistant"} and content:
-            messages.append({"role": role, "content": content[:4000]})
+            content = content[:4000]
+            if len(content) > remaining:
+                break
+            recent_messages.append({"role": role, "content": content})
+            remaining -= len(content)
+    messages.extend(reversed(recent_messages))
 
     context_text = json.dumps(context, ensure_ascii=False, default=str)
     prompt = (
@@ -973,12 +986,14 @@ async def generate_markdown_response(
         max_tokens=max_tokens,
     )
     data = await _post_chat(payload) if provider == "OPENAI" else await _post_chat(payload, provider=provider)
+    finish = (data.get("choices") or [{}])[0].get("finish_reason")
+    if finish == "length":
+        raise AIResponseError("provider_output_limit", "El proveedor interrumpió la respuesta antes de terminar", data.get("usage"))
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError("El proveedor IA respondió sin texto utilizable") from exc
     if not isinstance(content, str) or not content.strip():
-        finish = (data.get("choices") or [{}])[0].get("finish_reason")
         reason = "provider_output_limit" if finish == "length" else "provider_empty_response"
         raise AIResponseError(reason, "El proveedor no devolvió texto utilizable", data.get("usage"))
     markdown = content.strip() if preserve_structured_output else _enforce_markdown_policy(_coerce_markdown(content), response_policy)

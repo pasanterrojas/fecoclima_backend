@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 import os
 import socket
 from datetime import UTC, date, datetime, timedelta
@@ -157,6 +159,8 @@ async def _cleanup_files() -> dict[str, Any]:
 
 async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
     payload = job.payload or {}
+    if job.job_type in {'DAILY_PRODUCER_DIGEST', 'PLOT_ALERT_MONITOR', 'PLOT_ALERT_DISPATCH'}:
+        return {'status': 'RETIRED', 'reason': 'Use Avisos y alertas'}
     if job.job_type == "PLOT_ALERT_MONITOR":
         from app.services.plot_alerts import monitor_plot_rules
         return await monitor_plot_rules(db)
@@ -230,13 +234,13 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
             date.fromisoformat(payload["date_to"]),
             float(payload.get("max_cloud_percentage", 40)),
         )
+    if job.job_type == "NOTIFICATION_EVENT_CYCLE":
+        from app.services.notification_cycles import execute_event_cycle
+        return await execute_event_cycle(db, UUID(payload['run_id']))
     if job.job_type == "NOTIFICATION_EVENT_SINGLE":
-        from app.db.models import NotificationEvent
-        from app.services.notification_events import evaluate_event
-        event = await db.get(NotificationEvent, payload['event_id'])
-        if not event or not event.active:
-            return {'status':'SKIPPED','reason':'event_disabled'}
-        return await evaluate_event(db,event,force=True)
+        from app.services.notification_cycles import queue_event_cycle
+        run, queued=await queue_event_cycle(db, UUID(payload['event_id']), mode='MANUAL', force=True)
+        return {'queued':queued,'run_id':str(run.id) if run else None}
     if job.job_type == "NOTIFICATION_EVENT_EVALUATE":
         from app.services.notification_events import process_scheduled_events
         return await process_scheduled_events(db)

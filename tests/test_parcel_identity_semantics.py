@@ -37,7 +37,7 @@ def test_precise_provider_failures_do_not_leak_provider_body():
     assert provider_fallback_reason(AIProviderError(400,'private','private response')) == 'provider_request'
 
 
-def test_widget_explanations_are_limited_but_reports_keep_detail():
+def test_short_labels_are_limited_but_full_interpretations_keep_detail():
     from app.services.widget_text import widget_summary, compact_widget_result
     text = '**Revise el cultivo.** ' + 'La humedad sigue elevada en la parcela. ' * 30
     summary = widget_summary(text)
@@ -45,7 +45,7 @@ def test_widget_explanations_are_limited_but_reports_keep_detail():
     assert summary.startswith('Revise el cultivo.')
     assert '**' not in summary
     assert len(widget_summary('🌾' * 1000)) <= 300
-    assert len(compact_widget_result({'markdown':text}, 'ORCHESTRATOR')['markdown']) <= 300
+    assert compact_widget_result({'markdown':text}, 'ORCHESTRATOR')['markdown'] == text
     assert compact_widget_result({'markdown':text}, 'PDF_REPORT')['markdown'] == text
 
 

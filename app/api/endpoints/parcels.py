@@ -36,8 +36,9 @@ from app.services.plot_alerts import compile_rule
 from app.services.plot_chat import public_messages, recent_image_urls, store_images, store_attachments, attachment_text, transcribe_audio, ALLOWED_ATTACHMENTS
 from app.services.plot_configuration import configure_plot
 from app.services.plot_pipeline import build_plot_analysis
-from app.services.plot_satellite_context import plot_satellite_context, plot_optical_history
+from app.services.plot_satellite_context import plot_satellite_context, plot_optical_history, prepare_selected_observation
 from app.services.serialization import model_dict
+from app.services.widget_recovery import recover_analysis_widget_text
 
 router = APIRouter(prefix="/parcels", tags=["Inteligencia por parcela"], dependencies=[Depends(require_csrf)])
 
@@ -213,9 +214,16 @@ async def analyze_parcel(
     _check_rate_limit(request, limit=6)
     plot = await _plot(db, plot_id, actor)
     try:
+        options = payload or ParcelAnalysisPayload()
+        observation_id = options.satellite_observation_id
+        if observation_id:
+            observation_id = await prepare_selected_observation(
+                db, plot, observation_id,
+                actor.browser_id if isinstance(actor, BrowserParcelActor) else _browser_session(request),
+            )
         analysis = await build_plot_analysis(
             db, plot, created_by=actor.id, refresh_forecast=True,
-            window_hours=(payload or ParcelAnalysisPayload()).window_hours,
+            window_hours=options.window_hours, satellite_observation_id=observation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -233,7 +241,11 @@ async def latest_analysis(plot_id: UUID, db: DbSession, actor: CurrentUser) -> d
         .order_by(PlotAnalysis.created_at.desc())
         .limit(1)
     )
-    return model_dict(row, exclude={"created_by"}) if row else None
+    if not row:
+        return None
+    result = model_dict(row, exclude={"created_by"})
+    result['agent_results'] = await recover_analysis_widget_text(db, row)
+    return result
 
 
 @router.post("/{plot_id}/refresh")
@@ -347,13 +359,19 @@ async def parcel_satellite_status(plot_id: UUID, db: DbSession, actor: CurrentUs
         BackgroundJob.payload == {'plot_id': str(plot.id)},
     ).order_by(BackgroundJob.created_at.desc()).limit(1))
     pending = bool(job and job.status in {'PENDING', 'RUNNING'})
+    failed = bool(job and (job.status in {'FAILED', 'CANCELLED'} or
+                          ((job.result or {}).get('sentinel_2') or {}).get('status') == 'UNAVAILABLE'))
+    history = await plot_optical_history(db, plot)
+    count = len(history)
+    history_message = (((job.result or {}).get('sentinel_2') or {}).get('history_message')) if job else None
     return {
-        'status': 'PROCESSING' if pending else 'AVAILABLE' if satellite else
-                  'FAILED' if job and job.status in {'FAILED', 'CANCELLED'} else 'NO_VALID_SCENE',
+        'status': 'PROCESSING' if pending else 'FAILED' if failed else 'AVAILABLE' if satellite else 'NO_VALID_SCENE',
         'satellite': satellite, 'radar': radar,
+        'history_count': count, 'history_limit': 3,
         'job_status': job.status if job else None,
-        'message': 'Procesando imágenes del polígono en Copernicus.' if pending else
-                   'Los índices ya están disponibles para su parcela.' if satellite else
+        'message': f'Buscando las 3 imágenes más recientes del polígono: {count}/3 disponibles.' if pending else
+                   'Copernicus no pudo completar la búsqueda. Se conservan las imágenes anteriores; puede volver a intentar.' if failed else
+                   history_message or f'{count} de 3 imágenes con indicadores disponibles para su parcela.' if satellite else
                    'No hay valores satelitales válidos disponibles para esta parcela.',
     }
 
@@ -362,7 +380,16 @@ async def parcel_satellite_status(plot_id: UUID, db: DbSession, actor: CurrentUs
 async def parcel_satellite_history(plot_id: UUID, db: DbSession, actor: CurrentUser) -> dict:
     plot = await _plot(db, plot_id, actor)
     return {'items': await plot_optical_history(db, plot), 'planting_date': plot.planting_date,
-            'scope': 'processed_scenes_current_geometry', 'limit': 90}
+            'scope': 'processed_scenes_current_geometry', 'limit': 3}
+
+
+@router.post('/{plot_id}/satellite/refresh')
+async def refresh_parcel_satellite(plot_id: UUID, request: Request, db: DbSession, actor: CurrentUser) -> dict:
+    from app.api.endpoints.agent_public import _check_rate_limit
+    _check_rate_limit(request, limit=12, window_seconds=60)
+    plot = await _plot(db, plot_id, actor)
+    await enqueue_unique(db, 'PLOT_SATELLITE_SYNC', {'plot_id': str(plot.id)}, priority=85)
+    return {'status': 'PROCESSING', 'message': 'Buscando la imagen más reciente de su parcela.'}
 
 
 @router.post('/analyses/{analysis_id}/satellite/sync')
@@ -375,25 +402,31 @@ async def sync_analysis_satellite(analysis_id: UUID, db: DbSession, actor: Curre
     analysis = await _analysis(db, analysis_id, actor)
     plot = await _plot(db, analysis.plot_id, actor)
     current = analysis.context or {}
+    if (current.get('satellite_selection') or {}).get('mode') == 'selected':
+        return {'updated': False, 'analysis': {**model_dict(analysis, exclude={'created_by'}),
+                                             'agent_results': await recover_analysis_widget_text(db, analysis)}}
     if current.get('plot', {}).get('geojson') != plot.geojson:
         raise HTTPException(409, 'La delimitación cambió. Vuelva a analizar la parcela.')
     satellite, radar, point = await plot_satellite_context(db, plot)
     if satellite is None and radar is None:
-        return {'updated': False, 'analysis': model_dict(analysis, exclude={'created_by'})}
+        return {'updated': False, 'analysis': {**model_dict(analysis, exclude={'created_by'}),
+                                             'agent_results': await recover_analysis_widget_text(db, analysis)}}
     old = current.get('satellite') or {}
     old_radar = current.get('radar') or {}
     if (old.get('id') == (satellite or {}).get('id')
             and old.get('indices') == (satellite or {}).get('indices')
             and old.get('index_images') == (satellite or {}).get('index_images')
             and old_radar == (radar or {})):
-        return {'updated': False, 'analysis': model_dict(analysis, exclude={'created_by'})}
+        return {'updated': False, 'analysis': {**model_dict(analysis, exclude={'created_by'}),
+                                             'agent_results': await recover_analysis_widget_text(db, analysis)}}
     analysis.context = {**current, 'satellite': satellite, 'radar': radar, 'inspection_point': point,
                         'satellite_loaded_at': datetime.now(UTC).isoformat()}
     analysis.agent_results = {key: value for key, value in (analysis.agent_results or {}).items()
                               if key not in {'RAG_CROP', 'CROP_ANALYSIS', 'DISEASE_ANALYSIS', 'SATELLITE_ANALYSIS', 'ORCHESTRATOR'}}
     await db.commit()
     await db.refresh(analysis)
-    return {'updated': True, 'analysis': model_dict(analysis, exclude={'created_by'})}
+    return {'updated': True, 'analysis': {**model_dict(analysis, exclude={'created_by'}),
+                                        'agent_results': await recover_analysis_widget_text(db, analysis)}}
 
 
 @router.post("/analyses/{analysis_id}/interpret")
@@ -531,7 +564,8 @@ async def parcel_chat(
             "attachments": files_saved,
             "transcription": transcription,
         },
-        {"role": "assistant", "content": result["markdown"], "status": result["status"]},
+        {"role": "assistant", "content": result["markdown"], "status": result["status"],
+         "fallback_reason": result.get("fallback_reason"), "model": result.get("model")},
     ]
     conversation.messages = messages[-100:]
     await db.commit()

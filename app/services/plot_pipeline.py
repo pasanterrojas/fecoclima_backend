@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from html import unescape
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -389,6 +390,7 @@ async def build_plot_analysis(
     reference: datetime | None = None,
     refresh_forecast: bool = False,
     window_hours: int = 72,
+    satellite_observation_id: UUID | None = None,
 ) -> PlotAnalysis:
     if window_hours not in WINDOWS:
         raise ValueError("Período de análisis no soportado")
@@ -613,7 +615,9 @@ async def build_plot_analysis(
             }
         except Exception:
             forecast = {"status": "UNAVAILABLE", "days": []}
-    satellite, radar_data, point = await plot_satellite_context(db, plot, reference)
+    satellite, radar_data, point = await plot_satellite_context(
+        db, plot, reference, **({'observation_id': satellite_observation_id} if satellite_observation_id else {}),
+    )
     context = {
         "protocol": "plot-intelligence-v1",
         "alert_scale": "six-conditions-v2",
@@ -630,6 +634,8 @@ async def build_plot_analysis(
         "rule_version": rule.version if rule else None,
         "radar": radar_data,
         "satellite": satellite,
+        "satellite_selection": {"mode": "selected" if satellite_observation_id else "latest",
+                                "observation_id": str(satellite_observation_id) if satellite_observation_id else None},
         "inspection_point": point,
         "forecast": forecast,
         "historical_regression": regressions,
