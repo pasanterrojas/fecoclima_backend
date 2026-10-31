@@ -1,0 +1,405 @@
+{
+  "revision": "stations-2026-10-31-v1",
+  "items": [
+    {
+      "name": "Pirapó",
+      "code": "EST-324874772DC6",
+      "external_guid": "53E161FF-735C-41C7-B080-04B38A0DF18F",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "Pirapó",
+      "latitude": -26.858422,
+      "longitude": -55.544136,
+      "altitude_m": 146.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#277da1",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "CIR-San Pedro",
+      "code": "EST-3FC426FBA0CC",
+      "external_guid": "031A036B-CC58-41EA-A677-7C5C3CB7C9DB",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "San Pedro",
+      "district": "",
+      "locality": "Carolina",
+      "latitude": -24.57983,
+      "longitude": -56.68992,
+      "altitude_m": 119.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#ff00f5",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Santa Rita",
+      "code": "EST-3FE05D575E94",
+      "external_guid": "8732AE46-5975-4F6D-B01C-EAF1793A1F2C",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Alto Paraná",
+      "district": "",
+      "locality": "Santa Rita",
+      "latitude": -25.796317,
+      "longitude": -55.088469,
+      "altitude_m": 299.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#f66151",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Santa Inés",
+      "code": "EST-5875A354ACBC",
+      "external_guid": "AD8DC370-BABA-4904-B22A-40F885179DF3",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "",
+      "latitude": -26.4397,
+      "longitude": -55.1006,
+      "altitude_m": 274.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#dc8add",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Vacay",
+      "code": "EST-7ECD2B7C36EF",
+      "external_guid": "F936DEEB-92FB-4B6C-8CC4-78ACF397AEFD",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "Bella Vista",
+      "latitude": -26.83163,
+      "longitude": -55.6904,
+      "altitude_m": 247.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#ffbe6f",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Maria Auxiliadora",
+      "code": "EST-8BEF78D85C76",
+      "external_guid": "4E316F02-A981-45F9-BE97-D0FDBE64C646",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "Arquitecto Tomás Romero Pereira",
+      "latitude": -26.5316,
+      "longitude": -55.2591,
+      "altitude_m": 351.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#cdab8f",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "La Paz (Itapúa)",
+      "code": "EST-92FA4EA840AE",
+      "external_guid": "C94E0939-CEE7-40E4-962B-078BBB8B625B",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "La Paz",
+      "latitude": -26.993498,
+      "longitude": -55.888956,
+      "altitude_m": 203.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#8ff0a4",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Yatytay",
+      "code": "EST-955F01E6A590",
+      "external_guid": "F6F01FCF-2EDB-4B19-AF50-23CF98BEC131",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "Yatytay",
+      "latitude": -26.676305,
+      "longitude": -55.08498,
+      "altitude_m": 273.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#f9f06b",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Edelira",
+      "code": "EST-B4EB3231C692",
+      "external_guid": "E8213C69-A9A4-44DB-92E2-4B1E135C2680",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "",
+      "latitude": -26.5367,
+      "longitude": -55.49409,
+      "altitude_m": 360.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#ffffff",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Capitan Miranda",
+      "code": "EST-BB6950D5A427",
+      "external_guid": "B0902999-A51E-40BD-8684-BE1832A264A1",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Itapúa",
+      "district": "",
+      "locality": "Capitán Miranda",
+      "latitude": -27.21946,
+      "longitude": -55.79837,
+      "altitude_m": 196.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [],
+      "leaf_sensor_config": {
+        "mode": "unknown"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#77767b",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "%",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    },
+    {
+      "name": "Raul Peña",
+      "code": "RAUL-PENA",
+      "external_guid": "C2694D32-5A4B-48C0-A3B6-8345D9E4935B",
+      "endpoint_url": "https://fecoclima.fecoprod.com.py/clima/api/estacion/lectura-guid-por-periodo/{guid}/{year}/{month_from}/{month_to}",
+      "description": null,
+      "country": "Paraguay",
+      "department": "Alto Paraná",
+      "district": "Doctor Raúl Peña",
+      "locality": "Naranjal",
+      "latitude": -26.105104442752573,
+      "longitude": -55.24054066181733,
+      "altitude_m": 272.0,
+      "timezone": "America/Asuncion",
+      "source_type": "FECOCLIMA_API",
+      "expected_interval_minutes": 10,
+      "available_variables": [
+        "temp",
+        "chill",
+        "hIndex",
+        "humid",
+        "dewpt",
+        "wind",
+        "hiWind",
+        "windDir",
+        "rain",
+        "totalRain",
+        "barom",
+        "solar",
+        "et",
+        "uv",
+        "temperaturaSuelo",
+        "humedadSuelo",
+        "sensorHoja"
+      ],
+      "leaf_sensor_config": {
+        "mode": "threshold",
+        "scale_max": 15,
+        "scale_min": 0,
+        "wet_threshold": 6,
+        "interpretation": "samples_at_or_above_threshold_count_as_wet"
+      },
+      "influence_geojson": null,
+      "influence_radius_m": 5000,
+      "active": true,
+      "import_config": {},
+      "integration_config": {
+        "map_color": "#93d31d",
+        "header_name": "clima-key",
+        "coordinate_note": "Actualizar con la coordenada exacta de la estación cuando esté disponible.",
+        "range_max_months": 6,
+        "coordinate_source": "locality_centroid_approximation",
+        "water_aggregation": {
+          "rain_mm": "daily_counter"
+        },
+        "soil_moisture_unit": "cb",
+        "soil_tension_proxy_enabled": false,
+        "soil_tension_rule_validated": false
+      }
+    }
+  ]
+}

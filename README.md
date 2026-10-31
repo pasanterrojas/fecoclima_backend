@@ -30,6 +30,10 @@ En **Administración → Parcelas → Histórico de parcelas e imágenes** se co
 - Generación de PDF en segundo plano.
 - Autenticación con access/refresh token, cookies HttpOnly, CSRF, recuperación de contraseña, bloqueo por intentos y auditoría.
 
+## Estaciones listas para producción
+
+La migración `0019_production_stations` incorpora las 11 estaciones reales configuradas, con ubicación, cobertura y sensores, sin duplicar GUID/código ni sobrescribir estaciones existentes. Véase [cómo aplicarlas después del pull](docs/ESTACIONES_PRODUCCION.md). Las claves del proveedor permanecen en el entorno del servidor.
+
 ## Inicio rápido con Docker
 
 Requisitos: Docker Engine y Docker Compose v2.
