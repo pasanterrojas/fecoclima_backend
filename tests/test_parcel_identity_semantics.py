@@ -55,7 +55,8 @@ def test_soil_sensor_unit_mismatch_explains_partial_evaluation():
     specs=[ConditionSpec(str(i),str(i),'humidity_avg_pct','gt',threshold_value=70,unit='%') for i in range(5)]
     specs.append(ConditionSpec('soil','Humedad del suelo','soil_moisture_avg_pct','gte',threshold_value=50,unit='%'))
     result=evaluate_window({'rule_values':{'humidity_avg_pct':85,'soil_moisture_avg_pct':69},'units':{'soil_moisture_avg_pct':'cb'},'variable_completeness_pct':{'soil_moisture_avg_pct':100,'humidity_avg_pct':100},'completeness_pct':99,'stale':False},specs,[],{'stage_code':'V1'},SimpleNamespace(configuration={}))
-    assert result['level']=='DATOS_INSUFICIENTES'
+    assert result['level']=='GRAVE'
+    assert result['assessment_status']=='PARTIAL'
     missing=result['conditions'][-1]
     assert missing['status']=='missing' and missing['missing_reason']=='incompatible_unit'
     assert 'cb' in missing['explanation'] and '%' in missing['explanation']

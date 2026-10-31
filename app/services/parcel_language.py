@@ -1,8 +1,57 @@
 """Presentation instructions; numerical analysis remains in the Python pipeline."""
-PARCEL_LANGUAGE_REVISION = 'complete-widget-explanations-v7'
+PARCEL_LANGUAGE_REVISION = 'complete-widget-explanations-v9'
+
+
+PRODUCER_VOICE_POLICY = """
+TONO FINAL PARA EL PRODUCTOR:
+Habla como un agrónomo que explica el lote a quien lo trabaja: directo, cercano y sin jerga.
+Cuenta qué pasa, por qué merece atención y qué revisar. No redactes como una auditoría del sistema.
+Las reglas de validación y de unidades son para tu razonamiento, no para repetirlas al lector.
+No escribas «no se convierte a porcentaje sin una curva calibrada», «lluvia requerida comparada»,
+«lectura vigente», «regresión histórica», «cobertura observada», «mojado foliar» ni «primeros trifolios».
+Di «lluvia requerida», «última lectura», «la imagen», «hojas mojadas» y «hojas nuevas».
+Si la lectura de suelo verificada indica seco, di «la tierra sigue seca»; omite el valor en cb en la vista productor.
+No expliques sensores, cálculos, conversiones ni métodos estadísticos: las mediciones ya están en sus widgets.
+Agrupa las limitaciones en una frase cuando cambien la decisión; no encadenes advertencias en cada oración.
+Usa solo las cifras decisivas y no repitas el mismo dato en varios apartados. No inventes cifras ni observaciones.
+Ejemplo de tono, no de hechos para copiar: «Aunque ha llovido, la tierra sigue seca en el punto de medición.
+Revise si ocurre lo mismo en otras partes del lote antes de decidir el riego».
+Conserva la precisión sin recitar las reglas: una señal no demuestra una enfermedad ni una pérdida.
+""".strip()
+
+
+def producer_voice_instruction(view_mode: str, purpose: str) -> str:
+    if purpose == 'PDF_REPORT' or (view_mode != 'producer' and purpose not in {'PHENOLOGY_ANALYSIS', 'ORCHESTRATOR'}):
+        return ''
+    return '\n' + PRODUCER_VOICE_POLICY
 
 
 def parcel_language_instruction(view_mode: str, purpose: str) -> str:
+    if purpose == 'PHENOLOGY_ANALYSIS':
+        return (
+            '\nPRIORIDAD EDITORIAL DEL WIDGET 3: Redacta una explicación conectada en español cotidiano, '
+            'normalmente de 80 a 130 palabras. Empieza con «**Etapa actual: [etapa]**», sin encabezados ###. '
+            'En un párrafo indica que la etapa es estimada y debe confirmarse en campo; después relaciona '
+            'los días con registro, la «lluvia requerida» y la lluvia registrada por la estación. '
+            'Usa solo required_compared_mm y rain_compared_mm de la etapa actual en stage_totals, '
+            'sin calcular cifras nuevas ni comparar lluvia parcial contra la demanda total de la etapa. '
+            'Conecta ese resultado con la lectura de suelo solo si su unidad, clasificación y vigencia están verificadas. '
+            'Que haya llovido más de lo requerido no descarta sequedad localizada; no confirma estrés. '
+            'Incorpora una frase sobre la imagen seleccionada cuando aporte evidencia real. '
+            'Usa satellite_fact_brief y la interpretación previa de SATELLITE_ANALYSIS, distinguiendo una señal '
+            'de un patrón visual: solo di «se aprecia en la imagen» si satellite_evidence_basis indica que el '
+            'especialista la vio y su interpretación respalda ese patrón. No inventes sectores, manchas ni lesiones. '
+            'Si la imagen no aporta evidencia suficiente, dilo brevemente sin rellenar con una descripción supuesta. '
+            'En un segundo párrafo menciona reducción potencial bajo estrés únicamente con el porcentaje '
+            'de susceptibility.reference_pct de esta etapa. Si es null, omite el porcentaje: nunca copies el '
+            'de otra etapa del documento. Explica en una frase que no es pérdida medida. '
+            'Termina con «**Acción:**» y una recomendación de campo concreta ligada a las señales anteriores. '
+            'Evita «requerimiento de referencia», siglas de índices, jerga, avisos repetidos, listas y '
+            'explicaciones de las curvas por rutina. Las fuentes se muestran aparte. '
+            'No incluyas pronóstico, tendencias de lluvia, métodos estadísticos ni alertas generales en W3. '
+            'Si la imagen es antigua o parcial, resume su limitación solo si cambia la recomendación. '
+            'Mantén el foco en agua y desarrollo de esta fase; la síntesis general y otras recomendaciones corresponden al widget 4.'
+        )
     if purpose in {'WEATHER_ANALYSIS', 'FORECAST_ANALYSIS'}:
         return (
             '\nPRIORIDAD DEL WIDGET DE PREDICCIÓN: Explica qué se espera en los próximos tres días '
@@ -31,6 +80,9 @@ def parcel_language_instruction(view_mode: str, purpose: str) -> str:
             'Usa tres apartados: «Qué está pasando», «Qué aporta la imagen» y «Qué hacer ahora». '
             'Primero da la conclusión y su importancia para el cultivo: relaciona las lecturas del período, '
             'la etapa estimada y las alertas con sus causas verificadas, sin repetir la ficha de datos. '
+            'No vuelvas a narrar el balance por etapas del widget 3: aquí sintetiza la situación general y '
+            'las decisiones prioritarias. Di «lluvia requerida» en lugar de «requerimiento de referencia»; '
+            'relaciona los hechos en frases naturales, sin enumerar siglas ni repetir advertencias documentales. '
             'Abre con la señal que más cambia la decisión de hoy y su consecuencia práctica. Un dato faltante '
             'para clasificar enfermedades no debe ocultar una señal de sequedad u otro problema que sí esté medido. '
             'Traduce NINGUNA como «Las condiciones evaluadas no activaron una alerta»; no equivale a ausencia de problemas. '

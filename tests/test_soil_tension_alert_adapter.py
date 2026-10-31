@@ -239,7 +239,8 @@ def test_window_uses_explicit_tension_rule_and_reports_missing_percent_correctly
     assert complete["level"] == "GRAVE" and complete["conditions_met"] == 6
     assert diagnose_window(window, [tension, *other], source) == []
     incomplete = evaluate_window(window, [standard_soil(), *other], [], {"stage_code": "V2"}, rule)
-    assert incomplete["level"] == "DATOS_INSUFICIENTES"
+    assert incomplete['level'] == 'GRAVE'
+    assert incomplete['assessment_status'] == 'PARTIAL'
     assert incomplete["conditions_met"] == 5
     soil = next(item for item in incomplete["conditions"] if item["key"] == "soil_moisture")
     assert soil["missing_reason"] == "incompatible_unit"

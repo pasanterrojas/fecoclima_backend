@@ -19,8 +19,8 @@ from app.services.serialization import model_dict
 from app.services.crop_knowledge import sync_crop_knowledge
 
 router = APIRouter(prefix="/knowledge", tags=["Base de conocimiento"])
-ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
-ALLOWED_MIME = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/markdown", "text/x-markdown", "application/octet-stream"}
+ALLOWED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".txt", ".md"}
+ALLOWED_MIME = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/plain", "text/markdown", "text/x-markdown", "application/octet-stream"}
 
 
 def _safe_filename(name: str) -> str:

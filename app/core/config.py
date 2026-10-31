@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     fecoclima_timeout_seconds: int = 30
     fecoclima_retry_count: int = 3
 
+    prediction_daily_hour: int = Field(default=6, ge=0, le=23)
+    prediction_daily_minute: int = Field(default=0, ge=0, le=59)
+    prediction_timezone: str = "America/Asuncion"
+
     open_meteo_base_url: str = "https://api.open-meteo.com/v1"
     station_geocoding_base_url: str = "https://nominatim.openstreetmap.org"
     station_elevation_url: str = "https://api.open-meteo.com/v1/elevation"

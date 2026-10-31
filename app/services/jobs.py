@@ -176,7 +176,10 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
         return await sync_plot_satellite(db, plot)
     if job.job_type == "PLOT_REPORT":
         from app.services.plot_reporting import generate_plot_report
-        return await generate_plot_report(db, payload["report_id"])
+        return await generate_plot_report(db, payload["report_id"], client_model=bool(payload.get('client_model')))
+    if job.job_type == "REGIONAL_MAP_ANALYSIS":
+        from app.services.regional_map import run_regional_analysis
+        return await run_regional_analysis(db, job.id)
     if job.job_type == "STATION_SYNC":
         date_from = date.fromisoformat(payload["date_from"])
         date_to = date.fromisoformat(payload["date_to"])
@@ -222,6 +225,16 @@ async def handle_job(db: AsyncSession, job: BackgroundJob) -> dict[str, Any]:
     if job.job_type == "RAG_INDEX":
         chunks = await index_document(db, payload["document_id"])
         return {"chunks": chunks}
+    if job.job_type == "STATION_DAILY_PREDICTION":
+        from app.services.station_prediction import station_prediction
+        from app.services.source_refresh import refresh_station_source_if_needed
+        station = await db.get(Station, UUID(payload["station_id"]))
+        if not station or not station.active or station.deleted_at:
+            return {"status": "SKIPPED"}
+        await refresh_station_source_if_needed(db, station, requested=True)
+        result = await station_prediction(db, station)
+        await db.commit()
+        return result
     if job.job_type == "FORECAST_REFRESH":
         return await _refresh_forecast(db, payload["station_id"])
     if job.job_type == "SATELLITE_SYNC":

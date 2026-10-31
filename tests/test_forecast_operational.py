@@ -30,3 +30,10 @@ def test_open_meteo_hourly_variables_make_six_condition_projection_possible():
     assert row["estimated_soil_moisture_pct"] == 58.0
     assert row["leaf_wetness_hours"] == 8.0
     assert row["leaf_wetness_method"] == "estimated_rh90_or_precipitation"
+
+
+def test_missing_model_hourly_data_does_not_invent_zero_leaf_wetness():
+    rows = aggregate_open_meteo_payload({"daily":{"time":["2026-10-31"]},
+        "hourly":{"time":[f"2026-10-31T{h:02d}:00" for h in range(24)]}})
+    assert rows[0]["leaf_wetness_hours"] is None
+    assert rows[0]["wind_speed_avg_ms"] is None

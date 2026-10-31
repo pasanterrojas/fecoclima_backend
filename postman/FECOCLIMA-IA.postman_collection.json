@@ -28,6 +28,26 @@
     {
       "key": "copernicusIntegrationId",
       "value": ""
+    },
+    {
+      "key": "analysisId",
+      "value": ""
+    },
+    {
+      "key": "plotReportId",
+      "value": ""
+    },
+    {
+      "key": "mapBrowserId",
+      "value": ""
+    },
+    {
+      "key": "mapBrowserAccess",
+      "value": ""
+    },
+    {
+      "key": "mapJobId",
+      "value": ""
     }
   ],
   "item": [
@@ -39,14 +59,41 @@
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/health"
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Estado ok\", () => pm.expect(pm.response.json().status).to.eql(\"ok\"));",
+                  "pm.test(\"Identificador de solicitud\", () => pm.expect(pm.response.headers.get(\"X-Request-ID\")).to.be.a(\"string\").and.not.empty);"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Ready",
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/ready"
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Estado ready\", () => pm.expect(pm.response.json().status).to.eql(\"ready\"));",
+                  "pm.test(\"Identificador de solicitud\", () => pm.expect(pm.response.headers.get(\"X-Request-ID\")).to.be.a(\"string\").and.not.empty);",
+                  "pm.test(\"PostgreSQL disponible\", () => pm.expect(pm.response.json().database).to.eql(\"ok\"));"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -182,6 +229,55 @@
             "method": "GET",
             "url": "{{baseUrl}}/reports/public"
           }
+        },
+        {
+          "name": "Consultas técnicas guardadas",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/admin/consultation-reports?limit=30&offset=0",
+            "description": "Requiere sesión de administrador/analista. Las mutaciones requieren X-CSRF-Token. Usa una captura de parcela existente; no recalcula ni mezcla períodos. El PDF se prepara con el worker PLOT_REPORT."
+          }
+        },
+        {
+          "name": "Fuentes revisadas del cliente",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/admin/consultation-reports/sources",
+            "description": "Requiere sesión de administrador/analista. Las mutaciones requieren X-CSRF-Token. Usa una captura de parcela existente; no recalcula ni mezcla períodos. El PDF se prepara con el worker PLOT_REPORT."
+          }
+        },
+        {
+          "name": "Generar modelo de consulta técnica",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/admin/consultation-reports/{{analysisId}}",
+            "description": "Requiere sesión de administrador/analista. Las mutaciones requieren X-CSRF-Token. Usa una captura de parcela existente; no recalcula ni mezcla períodos. El PDF se prepara con el worker PLOT_REPORT.",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Informe en cola\", () => { pm.response.to.have.status(200); const row = pm.response.json(); pm.expect([\"PENDING\", \"RUNNING\"]).to.include(row.status); pm.collectionVariables.set(\"plotReportId\", row.id); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Descargar consulta técnica",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/admin/consultation-reports/files/{{plotReportId}}",
+            "description": "Requiere sesión de administrador/analista. Las mutaciones requieren X-CSRF-Token. Usa una captura de parcela existente; no recalcula ni mezcla períodos. El PDF se prepara con el worker PLOT_REPORT."
+          }
         }
       ]
     },
@@ -244,6 +340,123 @@
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/satellite?limit=20"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Mapa abierto · sin WebGL",
+      "description": "Fuentes abiertas, acumulados con su frecuencia de lectura, captura de 72 horas por navegador. No es climatología ni pérdida de rendimiento medida. Consulte docs/MAPA_ABIERTO.md.",
+      "item": [
+        {
+          "name": "Preparar navegador del mapa",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Parcel-Session",
+                "value": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "url": "{{baseUrl}}/public/parcels/browser-session",
+            "description": "Capacidad anónima firmada, independiente de la cuenta CMS."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Sesión preparada\", () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.collectionVariables.set(\"mapBrowserId\", s.browser_id);",
+                  "pm.collectionVariables.set(\"mapBrowserAccess\", s.access_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Analizar todas las estaciones · 72 horas",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Parcel-Access",
+                "value": "{{mapBrowserAccess}}"
+              },
+              {
+                "key": "X-Parcel-Session",
+                "value": "{{mapBrowserId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/public/map/analyses",
+            "description": "Solicita actualización de todas las estaciones activas; respeta el intervalo del proveedor. Ejecutar solo cuando se desea actualizar."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Trabajo creado\", () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set(\"mapJobId\", pm.response.json().job_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar análisis regional",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Parcel-Access",
+                "value": "{{mapBrowserAccess}}"
+              },
+              {
+                "key": "X-Parcel-Session",
+                "value": "{{mapBrowserId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/public/map/analyses/{{mapJobId}}",
+            "description": "Solo el navegador que solicitó el trabajo puede consultar su captura. Las teselas contienen únicamente datos públicos de estaciones."
+          }
+        },
+        {
+          "name": "Relieve abierto · altitud",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/map/terrain/altitude/10/355/587.png"
+          }
+        },
+        {
+          "name": "Ríos principales · Natural Earth",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/map/rivers?west=-56&south=-26&east=-54&north=-24"
+          }
+        },
+        {
+          "name": "Temperatura · superficie estimada",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/public/map/analyses/{{mapJobId}}/tiles/temperature/10/355/587.png?altitude=false&domain=regional&scale=relative",
+            "description": "Tendencia regional estimada, hasta 100 km de una lectura y dentro del área de estaciones. domain=influence conserva los polígonos del CMS; scale=absolute usa una escala amplia. No es una medición de cada punto."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Predicción diaria · auditoría",
+      "item": [
+        {
+          "name": "Última predicción previa al día y valor observado (solo admin)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/forecasts/verification?limit=30&offset=0",
+            "description": "Requiere sesión administrativa. Filtra station_id, date_from, date_to. Las previsiones se congelan antes del día; los resultados se completan diariamente a las 06:00 America/Asuncion. Valores null no equivalen a cero."
           }
         }
       ]

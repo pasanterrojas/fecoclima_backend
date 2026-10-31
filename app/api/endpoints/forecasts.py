@@ -6,8 +6,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 
-from app.api.deps import AnalystUser, DbSession
-from app.db.models import Station, WeatherForecast
+from app.api.deps import AdminUser, AnalystUser, DbSession
+from app.db.models import Station, StationForecastVerification, WeatherForecast
 from app.schemas.actions import ForecastRefreshPayload
 from app.services.jobs import enqueue_job
 from app.services.serialization import model_dict
@@ -36,6 +36,28 @@ async def list_forecasts(
         query = query.where(WeatherForecast.provider == provider)
     rows = list((await db.scalars(query.order_by(WeatherForecast.forecast_date, WeatherForecast.generated_at.desc()).limit(limit))).all())
     return {"items": [model_dict(row, exclude={"raw_payload"}) for row in rows]}
+
+
+@router.get("/verification")
+async def prediction_verification(db: DbSession, _: AdminUser,
+    station_id: UUID | None = None, date_from: date | None = None, date_to: date | None = None,
+    limit: int = Query(default=60, ge=1, le=200), offset: int = Query(default=0, ge=0)) -> dict:
+    from app.core.config import settings
+    from sqlalchemy import func
+    filters = []
+    if station_id:
+        filters.append(StationForecastVerification.station_id == station_id)
+    if date_from:
+        filters.append(StationForecastVerification.target_date >= date_from)
+    if date_to:
+        filters.append(StationForecastVerification.target_date <= date_to)
+    query = select(StationForecastVerification, Station.name).join(Station).where(*filters)
+    rows = (await db.execute(query.order_by(StationForecastVerification.target_date.desc(), Station.name)
+                            .offset(offset).limit(limit))).all()
+    total = await db.scalar(select(func.count()).select_from(StationForecastVerification).where(*filters))
+    return {"items": [{**model_dict(row), "station_name": name} for row, name in rows], "total": total,
+            "schedule": {"hour": settings.prediction_daily_hour, "minute": settings.prediction_daily_minute,
+                         "timezone": settings.prediction_timezone}}
 
 
 @router.post("/refresh")

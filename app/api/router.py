@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     admin,
+    consultation_reports,
     agent_public,
     alerts,
     auth,
@@ -19,6 +20,7 @@ from app.api.endpoints import (
     parcel_imagery,
     public_parcels,
     public,
+    regional_map,
     reports,
     resources,
     rules,
@@ -36,6 +38,7 @@ for router in [
     health.router,
     auth.router,
     public.router,
+    regional_map.router,
     agent_public.router,
     users.router,
     stations.router,
@@ -52,6 +55,7 @@ for router in [
     imports.router,
     exports.router,
     reports.router,
+    consultation_reports.router,
     backups.router,
     jobs.router,
     admin.router,

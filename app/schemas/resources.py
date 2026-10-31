@@ -62,6 +62,13 @@ class StationPayload(BaseModel):
         from math import isfinite
         from app.services.soil_measurements import normalize_soil_unit
         config = dict(value)
+        if 'water_aggregation' in config:
+            aggregation = config['water_aggregation']
+            if not isinstance(aggregation, dict) or any(
+                key not in {'rain_mm', 'evapotranspiration_mm'} or mode not in {'unconfirmed', 'interval_sum', 'daily_counter'}
+                for key, mode in aggregation.items()
+            ):
+                raise ValueError('Confirme la agregación de lluvia y ET: por intervalo, contador diario o sin confirmar')
         if "map_color" in config:
             import re
             if not isinstance(config["map_color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", config["map_color"]):

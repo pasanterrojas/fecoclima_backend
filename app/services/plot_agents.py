@@ -13,10 +13,12 @@ from app.services.agent_defaults import default_agent_prompt
 from app.services.agent_runtime import _knowledge_revision, select_agent_version
 from app.services.ai import generate_markdown_response, provider_fallback_reason
 from app.services.rag import retrieve_chunks
+from app.services.technical_references import REFERENCE_POLICY, REFERENCE_REVISION, reference_fragments
+from app.services.water_balance import water_summary, compact_water_context, stage_water_summary
 from app.services.orchestrator_outputs import WIDGET_LABELS, permitted_widgets, render_widgets, fallback_widgets
 from app.services.chat_context import widget_context, conversation_observations, irrigation_fallback
 from app.services.widget_text import compact_widget_result
-from app.services.parcel_language import PARCEL_LANGUAGE_REVISION, parcel_language_instruction
+from app.services.parcel_language import PARCEL_LANGUAGE_REVISION, parcel_language_instruction, producer_voice_instruction
 from app.services.parcel_guidance import (
     field_review_candidate, guidance_response_contract, parse_guidance_response, satellite_plain_evidence,
 )
@@ -39,9 +41,9 @@ QUESTIONS = {
     "CROP_ANALYSIS": "Explica la situación de esta parcela y las acciones sugeridas para hoy.",
     "RAG_CROP": "Cruza clima, alertas calculadas, fenología, satélite y documentos del cultivo. Explica riesgos y posibles enfermedades como hipótesis y prioriza qué revisar en campo.",
     "PDF_REPORT": "Redacta el informe de esta parcela usando los resultados y las fuentes disponibles.",
-    "WEATHER_ANALYSIS": "Interpreta observaciones meteorológicas y predicción de tres días; distingue pronóstico API de regresión histórica y no calcules valores.",
+    "WEATHER_ANALYSIS": "Explica qué espera al productor mañana, pasado mañana y el tercer día usando forecast combinado ya calculado. Habla de calor, lluvia, viento y humedad en lenguaje cotidiano. Menciona solo cifras útiles y una labor que convenga anticipar o posponer. No digas OLS, cb, RMSE ni regresión. Las previsiones no son certezas; no calcules cifras nuevas.",
     "ALERT_ANALYSIS": "Explica únicamente las señales de alerta del período elegido por el productor.",
-    "PHENOLOGY_ANALYSIS": "Explica la etapa estimada, limitaciones y qué observar en campo.",
+    "PHENOLOGY_ANALYSIS": "Explica la etapa actual conectando lluvia requerida y registrada, suelo e imagen seleccionada con las evidencias disponibles. Indica reducción potencial bajo estrés solo si hay un porcentaje documentado para esta etapa y termina con una acción de campo concreta.",
     "SATELLITE_ANALYSIS": (
         "Interpreta Sentinel-1 y Sentinel-2 y el punto de revisión precalculado; no inventes coordenadas."
     ),
@@ -50,7 +52,7 @@ QUESTIONS = {
         "Sugiere posibles enfermedades como hipótesis, cita evidencia y aclara datos faltantes."
     ),
     "FORECAST_ANALYSIS": (
-        "Explica los próximos tres días; distingue pronóstico API de tendencia OLS histórica."
+        "Explica los próximos tres días con forecast combinado ya calculado, en palabras sencillas y una recomendación práctica; no calcules cifras ni presentes estimaciones como mediciones."
     ),
 }
 
@@ -81,6 +83,12 @@ def deterministic_summary(
     satellite = context.get("satellite") or {}
     radar = context.get("radar") or {}
     question_lower = (question or "").lower()
+    if purpose == "PHENOLOGY_ANALYSIS" and context.get('water_balance'):
+        return stage_water_summary(context['water_balance'], context=context)
+    if context.get('water_balance') and any(term in question_lower for term in (
+        'agua', 'requerimiento', 'déficit', 'deficit', 'pérdida', 'perdida', 'daño', 'riego',
+    )):
+        return water_summary(context['water_balance'])
     if purpose == "CROP_CHAT" and any(term in question_lower for term in (
         "suelo", "riego", "regar", "regando", "seco", "seca", "tensión", "tension",
     )):
@@ -100,6 +108,7 @@ def deterministic_summary(
         "NINGUNA": "Las condiciones evaluadas no activaron una alerta. Esto no descarta otros problemas en el cultivo.",
         "MODERADA": "**Alerta moderada** según las condiciones evaluadas.",
         "GRAVE": "**Alerta grave**: priorice una revisión en campo.",
+        "EVALUACION_PARCIAL": "**Señales disponibles:** la estación permite evaluar parte de las condiciones. Use esas señales para orientar el monitoreo; las condiciones sin medir podrían cambiar el nivel de riesgo.",
         "DATOS_INSUFICIENTES": "**Riesgo aún sin clasificar**: faltan mediciones para determinar si es normal, moderado o grave.",
     }.get(level, "**Riesgo sin evaluar**: no hay una clasificación disponible.")
 
@@ -189,9 +198,9 @@ def deterministic_summary(
             output.append("Compare fechas, píxeles válidos, nubosidad y etapa fenológica antes de atribuir causas al índice.")
         return "\n\n".join(output)
 
-    if purpose == "WEATHER_ANALYSIS" or any(term in question_lower for term in ("lluvia", "clima", "temperatura", "pronóstico", "pronostico", "llover", "lloverá", "llovera", "humedad del aire")):
-        return "\n\n".join(["**Clima observado y próximo**", measurement(), forecast_message(),
-                             "**Qué hacer:** contraste lo pronosticado con las condiciones reales de la parcela; no confunda previsión con lectura."])
+    if purpose in {"WEATHER_ANALYSIS", "FORECAST_ANALYSIS"} or any(term in question_lower for term in ("lluvia", "clima", "temperatura", "pronóstico", "pronostico", "llover", "lloverá", "llovera", "humedad del aire")):
+        return "\n\n".join(["**Qué se espera**", forecast_message(),
+            "**Cómo prepararse**", "Revise el pronóstico antes de organizar las labores al aire libre y compruebe cómo está la tierra en su parcela. La cantidad de lluvia puede cambiar."])
 
     if any(term in question_lower for term in ("suelo", "riego", "seco", "tensión", "tension")):
         tension = next((r.get("soil_tension") for r in raw if r.get("soil_tension")), None)
@@ -203,6 +212,8 @@ def deterministic_summary(
                              "**Qué hacer:** compruebe la humedad del suelo en campo y revise que la regla use la misma unidad que el sensor antes de decidir el riego."])
 
     output = ["**Cómo está su parcela**", level_message, *alert_evidence()]
+    if context.get('water_balance'):
+        output.append(water_summary(context['water_balance']))
     if purpose != "RAG_CROP":
         output.extend([f"Etapa del cultivo estimada por fecha de siembra: **{stage}** (confirmar en campo).", measurement(), forecast_message()])
     if level == "DATOS_INSUFICIENTES":
@@ -268,9 +279,13 @@ async def interpret_plot(
             and existing.get("view_mode", "producer") == view_mode
             and existing.get("window_hours") == window_hours
             and existing.get("language_revision") == PARCEL_LANGUAGE_REVISION
+            and existing.get("reference_revision") == REFERENCE_REVISION
+            and (purpose != "PHENOLOGY_ANALYSIS" or existing.get("water_criterion_revision") == "stage-water-v5")
         ):
             return compact_widget_result(existing, purpose, limit=2200 if purpose == "CROP_CHAT" else 1500, preserve_format=True)
     context = dict(analysis.context)
+    if context.get('water_balance'):
+        context['water_balance'] = compact_water_context(context['water_balance'])
     # La IA jamás recibe ventanas diferentes a la elegida: evita comparaciones
     # involuntarias, incluso cuando un prompt persistido en CMS las solicite.
     context["windows"] = {str(window_hours): (context.get("windows") or {}).get(str(window_hours), {})}
@@ -278,9 +293,10 @@ async def interpret_plot(
     if purpose == "CROP_CHAT":
         context["chat_requested_at"] = datetime.now(UTC).isoformat()
     context["temporal_scope"] = {
+        "water_balance": "Historia desde siembra hasta reference_at; independiente de la ventana de alertas. No se presentan sus totales como lluvia de la ventana seleccionada.",
         "observations": {"hours": window_hours, "ends_at": analysis.reference_at.isoformat()},
         "forecast": {"horizon_days": 3, "dates": [day["date"] for day in (context.get("forecast") or {}).get("days", [])]},
-        "regression": "Tendencia precalculada en Python con días históricos completos; referencia independiente de la ventana observada.",
+        "regression": "Tendencia precalculada con días históricos completos, independiente del período de alertas; forecast contiene su combinación prudente con Open-Meteo por estación. Explica forecast, sin recalcular ni volver a mezclar cifras.",
     }
     context["possible_diseases"] = [
         item for item in (context.get("possible_diseases") or [])
@@ -305,6 +321,12 @@ async def interpret_plot(
     except Exception:
         chunks = []
         context["rag_status"] = "UNAVAILABLE"
+    chunks = reference_fragments(context['crop'].get('code', ''),
+        ' '.join([context['phenology'].get('stage_code') or '', question or QUESTIONS.get(purpose, purpose)]), limit=6) + chunks
+    context['reference_policy'] = REFERENCE_POLICY
+    context['reference_revision'] = REFERENCE_REVISION
+    if chunks:
+        context['rag_status'] = 'AVAILABLE'
     context["retrieved_fragments"] = chunks
     context["sources"] = [
         {"document": row["document"], "page_or_section": row.get("page_or_section")} for row in chunks
@@ -321,11 +343,14 @@ async def interpret_plot(
                 "NINGUNA": "Las condiciones evaluadas no activaron una alerta; esto no descarta otros problemas.",
                 "MODERADA": "Se activó una alerta moderada según las condiciones evaluadas.",
                 "GRAVE": "Se activó una alerta grave según las condiciones evaluadas.",
+                "EVALUACION_PARCIAL": "Hay señales observadas útiles; las condiciones que la estación no reporta podrían cambiar la clasificación.",
             }.get(selected_window.get("level"), "No se puede clasificar el riesgo con los datos disponibles; no equivale a ausencia de alerta."),
             "satellite": satellite_plain_evidence(context),
         }
         context["field_review_candidate"] = field_review_candidate(context)
         context.pop("inspection_point", None)
+    if purpose in {"ORCHESTRATOR", "PHENOLOGY_ANALYSIS"}:
+        context["satellite_fact_brief"] = satellite_plain_evidence(context)
         satellite_result = (analysis.agent_results or {}).get("SATELLITE_ANALYSIS") or {}
         context["satellite_evidence_basis"] = {
             "specialist_viewed_image": satellite_result.get("status") == "completed"
@@ -333,6 +358,18 @@ async def interpret_plot(
             and satellite_result.get("view_mode", "producer") == view_mode
             and bool(satellite_result.get("images_processed")),
             "policy": "Los indicadores y promedios no describen lesiones ni localizan daños por sí solos.",
+        }
+    if purpose in {"WEATHER_ANALYSIS", "FORECAST_ANALYSIS"}:
+        context.pop("historical_regression", None)
+        context["prediction_contract"] = "Usa forecast combinado ya calculado. No combines cifras de nuevo ni infieras unidades de sensores. La ausencia de sensor no equivale a cero."
+    if purpose == "PHENOLOGY_ANALYSIS":
+        context.pop("forecast", None)
+        context.pop("historical_regression", None)
+        context["temporal_scope"].pop("forecast", None)
+        context["temporal_scope"].pop("regression", None)
+        context["previous_widget_interpretations"] = {
+            key: value for key, value in context["previous_widget_interpretations"].items()
+            if key in {"SATELLITE_ANALYSIS", "RAG_CROP"}
         }
     if purpose == "CROP_CHAT":
         context["conversation_observations"] = conversation_observations(history)
@@ -358,6 +395,8 @@ async def interpret_plot(
         "text_complete": True,
         "knowledge_revision": str(revision),
         "language_revision": PARCEL_LANGUAGE_REVISION,
+        "reference_revision": REFERENCE_REVISION,
+        **({"water_criterion_revision": "stage-water-v5"} if purpose == "PHENOLOGY_ANALYSIS" else {}),
         "allowed_widgets": context["allowed_widgets"],
     }
     if purpose == "CROP_CHAT" and images:
@@ -392,7 +431,14 @@ async def interpret_plot(
                    "Puedes usar valores, unidades, índices, fechas y limitaciones (no inventarlos). "
                    "Aporta una interpretación agronómica explicada, nunca solo un volcado de datos. "
                    "Responde la pregunta concreta. Máximo 300 palabras. " if purpose != "PDF_REPORT" else "")
-                + "\nREGLA DE PRIORIDAD MÁXIMA: Distingue siempre dos horizontes: las observaciones y alertas corresponden a las últimas " + str(window_hours) + " horas anteriores a reference_at; el pronóstico corresponde siempre a los PRÓXIMOS TRES DÍAS, no a esa ventana pasada. No nombres otras ventanas de observación. Contrasta el pronóstico Open-Meteo con la regresión histórica precalculada en Python cuando esté disponible, explicando coincidencias o diferencias sin calcular, combinar ni extrapolar cifras nuevas. La regresión usa su propio historial de días completos; no está limitada a las horas seleccionadas. Si falta pronóstico o historial suficiente, dilo y no lo inventes. Nunca presentes lluvia prevista como medida ni extrapolaciones como certezas. Nunca uses lenguaje de programación, nombres de variables, fórmulas, porcentajes de confianza ni jerga de sensores para un productor. Da primero la situación observada, luego lo esperado y una acción concreta. Una etapa de cultivo es estimada hasta verificarla en campo. Responde con párrafos naturales, no JSON."
+                + ("\nALCANCE W3: usa el historial de agua de la etapa actual. No añadas pronóstico ni comparación histórica del tiempo; corresponden al widget 5."
+                   if purpose == "PHENOLOGY_ANALYSIS" else
+                   "\nALCANCE TEMPORAL: las observaciones corresponden a las últimas " + str(window_hours)
+                   + " horas del análisis; el pronóstico a los próximos tres días. No mezcles lluvia registrada con prevista. "
+                   "El historial de agua desde la siembra es independiente de esa ventana. Usa solo cifras ya calculadas. "
+                   "Compara estimaciones del tiempo solo en el widget de predicción y si cambia una decisión, sin explicar sus métodos.")
+                + '\n' + REFERENCE_POLICY
+                + producer_voice_instruction(view_mode, purpose)
                 + parcel_language_instruction(view_mode, purpose)
                 + (guidance_response_contract(allowed if restricted else None) if purpose == "ORCHESTRATOR" else ""),
                 context,

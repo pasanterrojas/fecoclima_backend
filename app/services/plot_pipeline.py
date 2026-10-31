@@ -27,9 +27,13 @@ from app.db.models import (
 )
 from app.services.alert_engine import LEVEL_ORDER, ConditionSpec, evaluate_daily_alert
 from app.services.forecast import fetch_open_meteo
+from app.services.station_prediction import station_prediction, parcel_prediction, REVISION as PREDICTION_REVISION
 from app.services.geospatial import coverage_percentage, sync_plot_influences
 from app.services.phenology import calculate_stage
 from app.services.plot_satellite_context import plot_satellite_context
+from app.services.sensor_contingency import with_sensor_contingency
+from app.services.technical_references import REFERENCE_REVISION, reference_manifest, stage_monitoring
+from app.services.water_balance import build_water_balance
 from app.services.serialization import model_dict
 from app.services.soil_tension import soil_tension
 from app.services.alert_engine import select_soil_criterion
@@ -91,6 +95,9 @@ def rolling_windows(
                 rule_values[key] = round(rule_values[key] * 24 / hours, 3)
         expected = max(1, hours * 60 // max(1, station.expected_interval_minutes))
         clean = condition_readings_frame(rows, station)
+        statistics = {column: {key: None if pd.isna(value) else round(float(value), 3)
+            for key, value in {'mean': clean[column].mean(), 'minimum': clean[column].min(), 'maximum': clean[column].max()}.items()}
+            for column in clean.columns}
         variable_coverage = {
             key: round(min(100, int(clean[column].count()) * 100 / expected), 2)
             for key, column in {
@@ -117,6 +124,7 @@ def rolling_windows(
             "age_minutes": round(age, 1) if age is not None else None,
             "stale": age is None or age > max(60, station.expected_interval_minutes * 3),
             "values": values,
+            "statistics": statistics,
             "units": {"soil_moisture_avg_pct": effective_soil_moisture_unit(station)},
             "outliers": sum(1 for row in rows for key, bounds in VALID_RANGES.items()
                             if (value := getattr(row, key, None)) is not None
@@ -128,9 +136,19 @@ def rolling_windows(
 
 
 def historical_regression(
-    readings: list[WeatherReading], reference: datetime, timezone: str, *, expected_interval_minutes: int = 60
+    readings: list[WeatherReading], reference: datetime, timezone: str, *, expected_interval_minutes: int = 60, station: Station | None = None
 ) -> dict:
     """OLS on at least 7 complete local calendar days, never an API forecast."""
+    if station is not None:
+        from app.services.station_prediction import daily_history, predict_days
+        history = daily_history(station, readings, reference)
+        predictions = predict_days(history, [], reference, timezone)
+        mapping = {"temperature_avg_c": "temperature_c", "humidity_pct": "humidity_pct", "precipitation_mm": "rain_mm",
+                   "wind_speed_ms": "wind_speed_ms", "evapotranspiration_mm": "evapotranspiration_mm"}
+        days = [{"date": row["date"], "values": {mapping[key]: item["value"] for key, item in row["variables"].items() if key in mapping}}
+                for row in predictions]
+        return {"status": "COMPLETED" if any(row["values"] for row in days) else "INSUFFICIENT_HISTORY",
+                "method": "bounded_complete_daily_station_trend_v1", "days": days}
     tz = ZoneInfo(timezone)
     today = utc(reference).astimezone(tz).date()
     columns = ("temperature_c", "humidity_pct", "rain_mm")
@@ -379,6 +397,10 @@ def evaluate_window(
         result.update(level="DATOS_INSUFICIENTES", level_label=insufficient["label"], level_color=insufficient["color"])
         result["simple_explanation"] = "Faltan datos recientes, cobertura temporal suficiente o fenología."
         result["diseases"] = []
+    else:
+        result = with_sensor_contingency(result, values=rule_values,
+            stage_code=phenology.get('stage_code'), diseases=diseases,
+            configuration=rule.configuration, observed_units=soil_rule_units(actual_unit))
     return result
 
 
@@ -558,7 +580,7 @@ async def build_plot_analysis(
                     readings,
                     reference,
                     station.timezone,
-                    expected_interval_minutes=station.expected_interval_minutes,
+                    expected_interval_minutes=station.expected_interval_minutes, station=station,
                 ),
             }
         )
@@ -574,7 +596,11 @@ async def build_plot_analysis(
         # A peripheral station missing a sensor must not erase a complete,
         # independently usable station covering the whole polygon.
         complete = bool(valid) and valid_coverage >= 99
-        worst = max(valid, key=lambda row: LEVEL_ORDER.get(row["alert"]["level"], -1), default=None)
+        partial = [row for row in valid if row['alert']['level'] == 'EVALUACION_PARCIAL']
+        worst = max(valid, key=lambda row: LEVEL_ORDER.get(row["alert"]["level"], 0), default=None)
+        # A partial station cannot hide an already established grave signal.
+        if partial and (not worst or worst['alert']['level'] != 'GRAVE'):
+            worst = partial[0]
         windows[str(hours)] = {
             "hours": hours,
             "stations": rows,
@@ -595,6 +621,7 @@ async def build_plot_analysis(
         if (
             old.get("plot", {}).get("geojson") == plot.geojson
             and old.get("forecast", {}).get("status") == "COMPLETED"
+            and (not stations or old.get("forecast", {}).get("method_revision") == PREDICTION_REVISION)
             and old.get("forecast", {}).get("generated_at")
             and timedelta(0)
             <= reference - datetime.fromisoformat(old["forecast"]["generated_at"])
@@ -602,7 +629,10 @@ async def build_plot_analysis(
             and len(next_three_forecast_days(old["forecast"].get("days", []), local_date)) == 3
         ):
             forecast = {**old["forecast"], "days": next_three_forecast_days(old["forecast"]["days"], local_date)}
-    if refresh_forecast and forecast["status"] != "COMPLETED":
+    if refresh_forecast and forecast["status"] != "COMPLETED" and stations:
+        results = [await station_prediction(db, station, reference, fetcher=fetch_open_meteo) for station in stations]
+        forecast = parcel_prediction(results, influences, reference)
+    if refresh_forecast and forecast["status"] != "COMPLETED" and not stations:
         try:
             days = await fetch_open_meteo(float(plot.latitude), float(plot.longitude), days=4)
             forecast = {
@@ -618,6 +648,10 @@ async def build_plot_analysis(
     satellite, radar_data, point = await plot_satellite_context(
         db, plot, reference, **({'observation_id': satellite_observation_id} if satellite_observation_id else {}),
     )
+    water_balance = await build_water_balance(db, crop_code=crop.code,
+        planting_date=plot.planting_date, reference=reference,
+        stages=[{key: getattr(s, key) for key in ('code', 'name', 'description', 'order_index', 'start_day', 'end_day')} for s in stages],
+        stations=stations, timezone=timezone, phenology=phenology)
     context = {
         "protocol": "plot-intelligence-v1",
         "alert_scale": "six-conditions-v2",
@@ -631,6 +665,10 @@ async def build_plot_analysis(
         "selected_window_hours": window_hours,
         "windows": windows,
         "phenology": phenology,
+        "water_balance": water_balance,
+        "reference_revision": REFERENCE_REVISION,
+        "reference_sources": reference_manifest(crop.code),
+        "documentary_monitoring": stage_monitoring(crop.code, phenology.get('stage_code')),
         "rule_version": rule.version if rule else None,
         "radar": radar_data,
         "satellite": satellite,

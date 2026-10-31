@@ -334,7 +334,10 @@ def test_sensor_units_are_not_silently_converted_to_percent():
         for i, variable in enumerate(variables)
     ]
     result = evaluate_window(window, specs, [], {"stage_code": "V1"}, SimpleNamespace(configuration={}))
-    assert result["level"] == "DATOS_INSUFICIENTES"
+    # Five measured signals already satisfy the published grave threshold;
+    # the incompatible soil measurement remains missing, never converted.
+    assert result["level"] == "GRAVE"
+    assert result['assessment_status'] == 'PARTIAL'
     assert result["values_used"]["soil_moisture_avg_pct"] is None
     expression = compile_rule("humedad del suelo supera 50%")
     context = {

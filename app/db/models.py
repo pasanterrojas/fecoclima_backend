@@ -640,6 +640,22 @@ class WeatherForecast(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("station_id", "forecast_date", "provider", name="uq_forecast_station_date_provider"),)
 
 
+class StationForecastVerification(Base, TimestampMixin):
+    __tablename__ = "station_forecast_verifications"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    station_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stations.id", ondelete="CASCADE"), index=True)
+    target_date: Mapped[date] = mapped_column(Date, index=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    target_starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    timezone: Mapped[str] = mapped_column(String(80))
+    method_revision: Mapped[str] = mapped_column(String(80))
+    predicted: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    observed: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    observation_coverage: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("station_id", "target_date", name="uq_station_prediction_day"),)
+
+
 class Report(Base, TimestampMixin):
     __tablename__ = "reports"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)

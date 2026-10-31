@@ -1,0 +1,41 @@
+<!doctype html><html lang="es"><meta charset="utf-8">
+<style>@page{size:A4;margin:17mm}body{font:10pt sans-serif;color:#15334a}h1,h2,h3{color:#004481}h1{font-size:20pt}h2{font-size:14pt;margin-top:22px}table{width:100%;border-collapse:collapse;margin:10px 0}td,th{padding:6px;border:1px solid #ccd9e4;overflow-wrap:anywhere}th{background:#eaf3f8;text-align:left}small,footer{color:#567083}img{max-width:100%;max-height:260px}figure{break-inside:avoid}pre{white-space:pre-wrap;font:9pt sans-serif}.note{padding:10px;background:#f0f6fa}tr{break-inside:avoid}</style>
+<h1>Informe de consulta técnica realizada</h1>
+<p>FECOCLIMA IA · {{ context.plot.name }} · {{ context.crop.name }}</p>
+<table><tr><th>Fecha de siembra</th><td>{{ context.plot.planting_date }}</td></tr>
+<tr><th>Referencia del análisis</th><td>{{ context.reference_at }}</td></tr>
+<tr><th>Período analizado</th><td>{{ context.selected_window_hours | default(72) }} horas</td></tr>
+<tr><th>Estado fenológico estimado</th><td>{{ context.phenology.stage_name }}</td></tr>
+<tr><th>Superficie</th><td>{{ context.plot.area_ha }} ha</td></tr></table>
+<p class="note">Consulta basada en la evidencia guardada para la fecha indicada. La fenología es estimada; confirme en campo. Las fuentes documentales aportan referencias y no constituyen observaciones de esta parcela.</p>
+<h2>1. Evidencia observada según la estación meteorológica automática</h2>
+{% for station in report_stations %}<h3>{{ station.name }}</h3>
+<p>Período: {{ station.from }} a {{ station.to }} · {{ station.samples }} lecturas · {{ station.status }}</p>
+<table><tr><th>Variable</th><th>Valor del período</th><th>Mínimo</th><th>Máximo</th><th>Unidad</th></tr>
+{% for metric in station.metrics %}<tr><td>{{ metric.label }}</td><td>{{ metric.value }}</td><td>{{ metric.minimum | observed }}</td><td>{{ metric.maximum | observed }}</td><td>{{ metric.unit }}</td></tr>{% endfor %}</table>
+<small>La falta de un sensor no se interpreta como cero. Los acumulados de las reglas conservan la semántica registrada y no sustituyen el balance diario con agregación confirmada.</small>
+<table><tr><th>Condición publicada</th><th>Resultado</th><th>Evidencia</th></tr>
+{% for condition in station.conditions %}<tr><td>{{ condition.label }}</td><td>{{ condition.status }}</td><td>{{ condition.explanation }}</td></tr>{% endfor %}</table>{% endfor %}
+<h3>Observación satelital seleccionada</h3>
+{% if context.satellite %}<p>Captura: {{ context.satellite.captured_at }} · NDVI: {{ context.satellite.ndvi | observed }}. Un índice no confirma una enfermedad ni cuantifica daños.</p>{% else %}<p>No hay escena válida para esta consulta.</p>{% endif %}
+{% for image in report_images %}<figure><img src="{{ image.url }}"><figcaption>{{ image.caption }}</figcaption></figure>{% endfor %}
+<h3>Agua requerida y agua registrada</h3>
+<div>{{ water_text }}</div>{{ water_chart }}
+{% if context.water_balance | default(false) %}
+<p>{{ context.water_balance.susceptibility.explanation }}</p>
+{% for station in context.water_balance.stations %}<p><b>{{ station.name }}</b> · Días comparables: {{ station.compared_days }} de {{ station.closed_days }} · Lluvia: {{ station.rain_compared_mm | observed }} mm · Demanda de esos mismos días: {{ station.required_compared_mm | observed }} mm · Diferencia: {{ station.rain_minus_requirement_mm | observed }} mm.</p>{% endfor %}
+{% else %}<p>Esta captura es anterior al módulo hídrico. Genere un análisis nuevo para incorporarlo; no se modificó retroactivamente la evidencia.</p>{% endif %}
+<h2>2. Identificación de situación</h2>
+{% for station in report_stations %}<p><b>{{ station.name }}</b> · {{ station.explanation }}</p>{% endfor %}
+{{ narrative_html }}
+<h2>3. Sugerencia de acciones</h2>
+<p>Verifique el estado fenológico y la humedad en la zona de raíces. Revise las señales observadas, el pronóstico y las condiciones que la estación no reporta antes de decidir el manejo.</p>
+{% if field_guidance %}{{ field_guidance }}{% else %}<p>Inspeccione sectores con síntomas o diferencias visibles en campo; no hay una guía específica documentada para esta fase. Las hipótesis requieren verificación.</p>{% endif %}
+<h3>Próximos tres días · pronóstico, no medición</h3>
+{% for day in context.forecast.days %}<p>{{ day.date }} · {{ day.temperature_min_c | observed }} a {{ day.temperature_max_c | observed }} °C · Lluvia prevista: {{ day.precipitation_mm | observed }} mm.</p>{% endfor %}
+<h3>Conversación y observaciones del productor</h3>
+{% for message in consultation_messages %}<p><b>{{ message.role }}</b>: {{ message.content }}</p>{% else %}<p>Sin conversación adjunta a este análisis.</p>{% endfor %}
+<h3>Fuentes y trazabilidad</h3>
+{% for source in report_sources %}<p>{{ source.document }} · {{ source.page_or_section }}</p>{% endfor %}
+<h3>Limitaciones</h3>{% for item in context.limitations %}<p>{{ item }}</p>{% endfor %}
+<footer>Se conserva el flujo de parcela, fecha de siembra, ventana seleccionada y reglas publicadas. Los porcentajes documentales no son pérdidas medidas. Confirmar hipótesis en campo.</footer></html>

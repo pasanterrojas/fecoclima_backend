@@ -31,6 +31,7 @@ from app.services.ai import (
 )
 from app.services.analysis_context import build_complete_analysis_context
 from app.services.rag import retrieve_chunks
+from app.services.technical_references import REFERENCE_POLICY, REFERENCE_REVISION, reference_fragments
 from app.services.satellite import latest_satellite_observation, local_satellite_image_path
 from app.services.year_comparison import build_year_comparison
 
@@ -97,6 +98,9 @@ PROTOCOLO DE SALIDA PRIORITARIO:
 - Menciona exclusivamente el período seleccionado por el usuario; no describas ventanas de cálculo de otros períodos aunque aparezcan en documentos recuperados o instrucciones anteriores.
 - Esta instrucción reemplaza cualquier requisito anterior del prompt que solicite JSON o una estructura serializada.
 """.strip()
+    from app.services.parcel_language import producer_voice_instruction
+    output_protocol += producer_voice_instruction('producer', purpose)
+    grounding_protocol += '\n' + REFERENCE_POLICY
     presentation = response_policy_prompt(response_policy, purpose)
     return "\n\n".join(
         part for part in [system_prompt.strip(), grounding_protocol, extra, presentation, output_protocol] if part
@@ -120,6 +124,7 @@ PROTOCOLO DE CONVERSACIÓN CONTEXTUAL — PRIORIDAD MÁXIMA:
 - No recomiendes principios activos, dosis ni aplicaciones a partir de una foto. Indica qué debe verificarse en campo o laboratorio y cuándo consultar a un profesional.
 """.strip(),
             SATELLITE_CONTEXT_POLICY,
+            REFERENCE_POLICY,
             """
 FORMATO:
 - Devuelve solo Markdown claro y directo, normalmente entre 120 y 600 palabras.
@@ -223,6 +228,8 @@ async def _context_with_rag(
         logger.warning("agent_rag_retrieval_failed", error=str(exc)[:1000])
         chunks = []
         retrieval_status = {"status": "FAILED", "error": str(exc)[:1000], "fragments": 0}
+    chunks = reference_fragments(crop.code if crop else '', query) + chunks
+    retrieval_status['fragments'] = len(chunks)
     sources = [
         {"documento": chunk["document"], "pagina_o_seccion": chunk["page_or_section"]}
         for chunk in chunks
@@ -232,6 +239,7 @@ async def _context_with_rag(
         "sources": sources,
         "retrieved_fragments": chunks,
         "knowledge_retrieval": retrieval_status,
+        "reference_revision": REFERENCE_REVISION,
     }, sources
 
 

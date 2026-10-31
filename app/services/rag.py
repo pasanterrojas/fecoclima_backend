@@ -31,7 +31,36 @@ def extract_file_text(content: bytes, mime_type: str, filename: str) -> list[tup
         return [(page.extract_text() or "", f"página {index + 1}") for index, page in enumerate(reader.pages)]
     if mime_type in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"} or suffix == ".docx":
         doc = DocxDocument(BytesIO(content))
-        return [("\n".join(paragraph.text for paragraph in doc.paragraphs), "documento")]
+        sections = [("\n".join(paragraph.text for paragraph in doc.paragraphs), "párrafos del documento")]
+        for index, table in enumerate(doc.tables, start=1):
+            for row_index, row in enumerate(table.rows, start=1):
+                sections.append((' | '.join(cell.text for cell in row.cells), f'tabla {index}, fila {row_index}'))
+        return sections
+    if suffix == '.xlsx' or mime_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        from openpyxl import load_workbook
+        formulas = load_workbook(BytesIO(content), read_only=True, data_only=False)
+        cached = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        sections = []
+        try:
+            for sheet, values in zip(formulas.worksheets, cached.worksheets):
+                for row, saved in zip(sheet.iter_rows(), values.iter_rows()):
+                    cells = []
+                    coordinates = []
+                    for cell, stored in zip(row, saved):
+                        if cell.value is None:
+                            continue
+                        value = stored.value if cell.data_type == 'f' else cell.value
+                        if isinstance(value, (float, int)) and '%' in cell.number_format:
+                            value = f'{value*100:g}% [fracción interna {value:g}]'
+                        text = f'{cell.coordinate}: {value if value is not None else "sin valor calculado"}'
+                        if cell.data_type == 'f':
+                            text += f' [fórmula de referencia, no ejecutada: {cell.value}]'
+                        cells.append(text); coordinates.append(cell.coordinate)
+                    if cells:
+                        sections.append((' | '.join(cells), f'{sheet.title}!{coordinates[0]}:{coordinates[-1]}'))
+        finally:
+            formulas.close(); cached.close()
+        return sections
     if mime_type.startswith("text/") or suffix in {".txt", ".md"}:
         return [(content.decode("utf-8", errors="replace"), "texto")]
     raise ValueError("Tipo de archivo no admitido")

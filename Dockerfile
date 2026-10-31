@@ -18,8 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt pyproject.toml ./
-RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+COPY requirements.txt requirements.lock pyproject.toml ./
+RUN python -m pip install -r requirements.lock
 
 COPY . .
 RUN mkdir -p /data/reports /data/uploads /data/backups /data/exports /data/error-reports /tmp/matplotlib \

@@ -100,6 +100,9 @@ async def create_station(payload: StationPayload, request: Request, db: DbSessio
         raise HTTPException(status_code=409, detail="El GUID externo ya pertenece a otra estación")
     data = payload.model_dump()
     data["code"] = code
+    water = dict(data["integration_config"].get("water_aggregation") or {})
+    water.setdefault("rain_mm", "daily_counter")
+    data["integration_config"]["water_aggregation"] = water
     station = Station(**data, created_by=actor.id)
     db.add(station)
     await db.flush()

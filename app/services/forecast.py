@@ -17,6 +17,7 @@ HOURLY_VARIABLES = [
     "temperature_2m",
     "relative_humidity_2m",
     "precipitation",
+    "wind_speed_10m",
     "soil_temperature_6cm",
     "soil_moisture_3_to_9cm",
 ]
@@ -38,7 +39,7 @@ def _float_or_none(value: Any) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return None if np.isnan(parsed) else round(parsed, 3)
+    return round(parsed, 3) if np.isfinite(parsed) else None
 
 
 def _daily_value(daily: dict[str, Any], key: str, index: int) -> float | None:
@@ -86,13 +87,16 @@ def aggregate_open_meteo_payload(payload: dict[str, Any]) -> list[dict[str, Any]
         if not subset.empty:
             temperature_avg = _float_or_none(subset["temperature_2m"].mean(skipna=True))
             soil_temperature = _float_or_none(subset["soil_temperature_6cm"].mean(skipna=True))
-            leaf_wetness_hours = _float_or_none(subset["wet_proxy"].sum())
+            wet_coverage = (subset["precipitation"].notna() | subset["relative_humidity_2m"].notna()).sum()
+            if wet_coverage >= 20:
+                leaf_wetness_hours = _float_or_none(subset["wet_proxy"].sum())
         result.append(
             {
                 "date": day_text,
                 "temperature_min_c": _daily_value(daily, "temperature_2m_min", index),
                 "temperature_max_c": _daily_value(daily, "temperature_2m_max", index),
                 "temperature_avg_c": temperature_avg,
+                "wind_speed_avg_ms": _float_or_none(subset["wind_speed_10m"].mean(skipna=True) / 3.6) if not subset.empty else None,
                 "precipitation_mm": _daily_value(daily, "precipitation_sum", index),
                 "precipitation_probability_pct": _daily_value(daily, "precipitation_probability_max", index),
                 "humidity_pct": _daily_value(daily, "relative_humidity_2m_mean", index),

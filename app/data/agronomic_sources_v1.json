@@ -1,0 +1,797 @@
+{
+  "revision": "client-sources-2026-10-30-v1",
+  "documents": [
+    {
+      "document": "Alerta Soja x dia.xlsx",
+      "sha256": "72639919e033fe0779aeff3cdd591a024049e4cd2ef03ebe21580f590a3e4969",
+      "crop": "SOJA",
+      "sections": [
+        {
+          "section": "Instructivo!A1:A1",
+          "text": "A1: ALERTA TEMPRANA CULTIVOS"
+        },
+        {
+          "section": "Instructivo!A2:C2",
+          "text": "A2: Hoja | B2: Que contiene | C2: Que hacer"
+        },
+        {
+          "section": "Instructivo!A3:C3",
+          "text": "A3: EMA Verano | B3: Contiene las mediciones de la EMA mas cercana a la parcela en analisis, y las fechas, por lo menos 3 a 5 dias anteriores a la fecha donde se realiza el analisis | C3: Seleccionar la EMA mas cercana de la plataforma Fecoclima\nDefinir el rango de fechas anteriores a la fecha a analizar\nCopiar las mediciones de la plataforma Fecoclima en el rango seleccionado\nPegar los datos copiados en la hoja EMA Verano"
+        },
+        {
+          "section": "Instructivo!A4:C4",
+          "text": "A4: Fenologia Soja | B4: Contiene la estimacion de la duracion de cada estado fenoligico de la soja de ciclo medio y las principales enfermedades que la podrian afectar según su estado fenologico al momento del analisis | C4: Anotar en la celda amarilla la fecha de siembra"
+        },
+        {
+          "section": "Instructivo!A5:C5",
+          "text": "A5: Soja x dia | B5: Contiene las mediciones obtenidas de la EMA, con los parametros minimos para declarar una alerta Grave o Medarada, las celdas que pasan el rango minimo se vuelven de color amarillo y si se cumple 3 condiciones es considerada Alerta Moderada y si se cumplen las 6 condiciones se considera alerta Grave, Ademas contiene en una celda el estado fenologico a la fecha del analisis | C5: Anotar la fecha del analisis en la celda coloreada de axul"
+        },
+        {
+          "section": "Instructivo!A6:C6",
+          "text": "A6: Enfermedades Soja | B6: Contiene una lista de enfermedades comunes en la Soja, como asi tambien una imagen para identificar los estados fenolgicos y un listado de los nombres de cada estado fenologico en la soja | C6: Nada, Solo como informacion adicional"
+        },
+        {
+          "section": "Fenologia soja!A2:A2",
+          "text": "A2: SOJA"
+        },
+        {
+          "section": "Fenologia soja!A3:T3",
+          "text": "A3: Estado Fenologico | B3:  Duracion  | C3: Fecha | D3: dias acumulados | E3: Roya de la Soja | F3: Mildiu | G3: Oidio  | H3: Mancha Marrón o Septoria  | I3: Tizón de la hoja y mancha púrpura de la semilla  | J3: Mancha anillada o Corynespora | K3: Mancha ojo de rana MOR | L3: Antracnosis  | M3: Cancro del tallo  | N3: Pudrición Carbonosa de la raíz  | O3: Síndrome de muerte súbita o repentina | P3: Damping off  | Q3: Tizón bacteriano  | R3: Pústula bacteriana  | S3: Virus del mosaico común de la soja (SMV)  | T3: Virus del Mosaico de la alfalfa (AMV) "
+        },
+        {
+          "section": "Fenologia soja!E4:T4",
+          "text": "E4: Phakopsora  pachyrhizi | F4: Peronospora manshurica | G4:  Microsphaera diffusa | H4: Septoria glycines | I4:  Cercospora kikuchii | J4: Corynespora cassiicola | K4: Cercospora sojina | L4: Colletotrichum truncatum | M4: Diaporthe phaseolorum | N4: Macrophomina phaseolin | O4: Varias especies de Fusarium | P4: Phytium spp. Phytophthora spp. Macrophomina phaseolina, Rhizoctonia solani, Fusarium spp, Colletotrichum  spp. | Q4: Pseudomonas savastonoi  pv. glycinea | R4: Xanthomonas axonopodis pv. glycines | S4: Potyvirus | T4: Alfamovirus"
+        },
+        {
+          "section": "Fenologia soja!A5:D5",
+          "text": "A5: Siembra  | C5: 45575 | D5: 0"
+        },
+        {
+          "section": "Fenologia soja!A6:D6",
+          "text": "A6: VE | B6: 5 | C6: 45580 [fórmula: C5+B6] | D6: 5 [fórmula: B6]"
+        },
+        {
+          "section": "Fenologia soja!A7:D7",
+          "text": "A7: V1 | B7: 9 | C7: 45589 | D7: 14 [fórmula: B6+B7]"
+        },
+        {
+          "section": "Fenologia soja!A8:D8",
+          "text": "A8: V2 a V4 | B8: 16 | C8: 45605 | D8: 30 [fórmula: B6+B7+B8]"
+        },
+        {
+          "section": "Fenologia soja!A9:D9",
+          "text": "A9: V5 a V8 | B9: 14 | C9: 45619 | D9: 44 [fórmula: B6+B7+B8+B9]"
+        },
+        {
+          "section": "Fenologia soja!A10:D10",
+          "text": "A10: V9 | B10: 10 | C10: 45629 | D10: 54 [fórmula: B6+B7+B8+B9+B10]"
+        },
+        {
+          "section": "Fenologia soja!A11:D11",
+          "text": "A11: R1  (Inic. Florac.) | B11: 5 | C11: 45634 | D11: 59 [fórmula: B6+B7+B8+B9+B10+B11]"
+        },
+        {
+          "section": "Fenologia soja!A12:D12",
+          "text": "A12: R3  (Inic. Vaina) | B12: 21 | C12: 45655 | D12: 80 [fórmula: B6+B7+B8+B9+B10+B11+B12]"
+        },
+        {
+          "section": "Fenologia soja!A13:D13",
+          "text": "A13: R5 (Inic. Grano) | B13: 17 | C13: 45672 | D13: 97 [fórmula: B6+B7+B8+B9+B10+B11+B12+B13]"
+        },
+        {
+          "section": "Fenologia soja!A14:D14",
+          "text": "A14: R7 (inicio de Maduracion) | B14: 11 | C14: 45683 | D14: 108 [fórmula: B6+B7+B8+B9+B10+B11+B12+B13+B14]"
+        },
+        {
+          "section": "Fenologia soja!A15:D15",
+          "text": "A15: R8 (Madurez Fisiol) | B15: 12 | C15: 45695 | D15: 120 [fórmula: B6+B7+B8+B9+B10+B11+B12+B13+B14+B15]"
+        },
+        {
+          "section": "Fenologia soja!A16:D16",
+          "text": "A16: R9 (Cosecha) | B16: 7 | C16: 45702 | D16: 127 [fórmula: SUM(B6:B16)]"
+        },
+        {
+          "section": "Fenologia soja!B17:B17",
+          "text": "B17: 127 [fórmula: SUM(B6:B16)]"
+        },
+        {
+          "section": "Enfermedades Soja!A1:A1",
+          "text": "A1: Soja"
+        },
+        {
+          "section": "Enfermedades Soja!A2:D2",
+          "text": "A2: Enfermedad | B2: Agente Causal | C2: Condiciones  | D2: Momento"
+        },
+        {
+          "section": "Enfermedades Soja!A3:D3",
+          "text": "A3: Roya de la Soja | B3: Phakopsora  pachyrhizi | C3: Necesita un mínimo de 6 a 8 horas de mojado foliar para ocurrir la infección  y temperaturas entre 15 - 28°C. | D3: cualquier etapa "
+        },
+        {
+          "section": "Enfermedades Soja!A4:D4",
+          "text": "A4: Oidio Agente  | B4:  Microsphaera diffusa | C4: Temperaturas de 18 - 26ºC; superior a 30ºC se detiene la infección. | D4:  más comum en R1"
+        },
+        {
+          "section": "Enfermedades Soja!A5:D5",
+          "text": "A5: Mancha Marrón o Septoria  | B5: Septoria glycines | C5: Temperaturas de 25 a 30ºC, mojado foliar de 6 a 36 horas. | D5:  R5-R6."
+        },
+        {
+          "section": "Enfermedades Soja!A6:D6",
+          "text": "A6: Tizón de la hoja y mancha púrpura de la semilla  | B6:  Cercospora kikuchii | C6: Temperaturas de 23 - 30ºC y alta humedad. | D6: R4-R7"
+        },
+        {
+          "section": "Enfermedades Soja!A7:D7",
+          "text": "A7: Cancro del tallo Agente causal: Diaporthe phaseolorum | B7: Diaporthe phaseolorum | C7: Temperaturas de 25 - 30ºC y alta humedad. | D7: V1-V6"
+        },
+        {
+          "section": "Enfermedades Soja!A8:D8",
+          "text": "A8: Mancha ojo de rana MOR | B8: Cercospora sojina | C8: Temperaturas de 26ºC y alta humedad | D8: V6-R7"
+        },
+        {
+          "section": "Enfermedades Soja!A9:D9",
+          "text": "A9: Antracnosis Agente causal: Colletotrichum truncatum | B9: Colletotrichum truncatum | C9: Temperaturas de 26-30ºC y alta humedad. | D9:  R6-R8"
+        },
+        {
+          "section": "Enfermedades Soja!A10:D10",
+          "text": "A10: Pudrición Carbonosa de la raíz  | B10: Macrophomina phaseolin | C10: Temperaturas de superiores a 30ºC y períodos de estrés hídrico. | D10: R5-R7"
+        },
+        {
+          "section": "Enfermedades Soja!A11:D11",
+          "text": "A11: Síndrome de muerte súbita o repentina | B11: Varias especies de Fusarium | C11: Temperaturas de 25 - 30ºC y alta humedad. | D11:  R1-R8"
+        },
+        {
+          "section": "Enfermedades Soja!A12:D12",
+          "text": "A12: Damping off  | B12: Phytium spp. Phytophthora spp. Macrophomina phaseolina, Rhizoctonia solani, Fusarium spp, Colletotrichum  spp. | C12: Temperaturas de 20 - 30ºC y alta humedad. | D12:  VC-V2"
+        },
+        {
+          "section": "Enfermedades Soja!A13:D13",
+          "text": "A13: Tizón bacteriano  | B13: Pseudomonas savastonoi  pv. glycinea | C13: Lluvias constantes  y temperaturas entre 20 - 26ºC. | D13: R6-R8"
+        },
+        {
+          "section": "Enfermedades Soja!A14:D14",
+          "text": "A14: Pústula bacteriana  | B14: Xanthomonas axonopodis pv. glycines | C14:  Lluvias constantes, y temperaturas entre 30-33ºC | D14:  R4-R8"
+        },
+        {
+          "section": "Enfermedades Soja!A15:D15",
+          "text": "A15: Virus del mosaico común de la soja (SMV)  | B15: Potyvirus | C15: Temperaturas cálidas | D15: cualquier etapa "
+        },
+        {
+          "section": "Enfermedades Soja!A16:D16",
+          "text": "A16: Virus del Mosaico de la alfalfa (AMV)  | B16: Alfamovirus | C16: Temperaturas cálidas | D16: cualquier etapa "
+        },
+        {
+          "section": "Enfermedades Soja!A17:D17",
+          "text": "A17: Mildiu Agente  | B17: Peronospora manshurica | C17:  Elevada humedad y temperatura entre 20 a 26ºC. | D17: cualquier etapa "
+        },
+        {
+          "section": "Enfermedades Soja!A18:D18",
+          "text": "A18: Mancha anillada o Corynespora | B18: Corynespora cassiicola | C18: Alta humedad 80% y temperaturas de 23 a 39ºC. | D18: cualquier etapa "
+        },
+        {
+          "section": "Enfermedades Soja!A38:A38",
+          "text": "A38: VE: Cotiledones sobre la superficie del suelo."
+        },
+        {
+          "section": "Enfermedades Soja!A39:A39",
+          "text": "A39:  V1: Hojas unifoliadas expandidas, con el primer trifolio abierto."
+        },
+        {
+          "section": "Enfermedades Soja!A40:A40",
+          "text": "A40:  V2: Primer trifolio expandido y la segunda hoja trifoliada abierta."
+        },
+        {
+          "section": "Enfermedades Soja!A41:A41",
+          "text": "A41:  V3: el segundo trifolio expandido y la tercera hoja trifoliada abierta."
+        },
+        {
+          "section": "Enfermedades Soja!A42:A42",
+          "text": "A42:  R1: Inicio de la floración, 50% de plantas con una flor. "
+        },
+        {
+          "section": "Enfermedades Soja!A43:A43",
+          "text": "A43: R3: Final de la floración, vainas con 1,5cm de diámetro. "
+        },
+        {
+          "section": "Enfermedades Soja!A44:A44",
+          "text": "A44: R4: La mayoría de las vainas del tercio superior con 2 a 4cm de diámetro. "
+        },
+        {
+          "section": "Enfermedades Soja!A45:A45",
+          "text": "A45: R5: Las vainas poseen entre 75 a 100% llenado de granos."
+        },
+        {
+          "section": "Enfermedades Soja!A46:A46",
+          "text": "A46:  R6: Vainas con 100% de llenado de granos."
+        },
+        {
+          "section": "Enfermedades Soja!A47:A47",
+          "text": "A47:  R8: 50% de defoliación por madurez."
+        },
+        {
+          "section": "Detalle Enfermedades!A1:H1",
+          "text": "A1: Momento | B1: Estado | C1: Agente | D1: Enfermedad | E1: infeccion | F1: sintoma | G1: Inspeccion en campo | H1: Condiciones Climaticas"
+        },
+        {
+          "section": "Detalle Enfermedades!H2:M2",
+          "text": "H2: Lluvia | I2: Mojado foliar  | J2: Humedad A | K2: Humedad S | L2: Temperatura A | M2: Temperatura S"
+        },
+        {
+          "section": "Detalle Enfermedades!A3:M3",
+          "text": "A3: Etapas Vegetativas Tempranas  | B3: Ve - V6) | C3: Complejo Diaporthe / Phomopsis  | D3: Cancro del tallo | E3: V2 a V4 | F3: Enfermedad de pre y post-emergencia (Damping-off): Si la semilla ya venía infectada, puede causar la muerte de la plántula antes de nacer o inmediatamente después (las plantas se caen y mueren en parches). | G3: * Agáchese y observe detenidamente la zona del cuello de la planta (donde el tallo se une con el suelo) y los cotiledones.\n* Las plántulas afectadas por el complejo Diaporthe mantienen cierta rigidez en el tallo (lesión seca), mientras que ataques por Phytophthora o Pythium causan una podredumbre acuosa y blanda (\"tallo estrujado\"). | H3: 20 milímetros (mm) o más en un solo evento \n50 (mm) en el transcurso de una semana | I3: 6 a 12 horas consecutivas y temperaturas superiores a 20 °C. | J3: 80% por 24 hs | K3: 60% por 24 hs | L3: 20 ºC a 30 ºC | M3: 15 ºC a 20 ºC"
+        },
+        {
+          "section": "Detalle Enfermedades!F4:G4",
+          "text": "F4: Lesiones en cotiledones: Se observan manchas hundidas de color marrón oscuro, de forma irregular, en los cotiledones. Estos se secan de forma anticipada. | G4: Si corta el tallo de una planta sospechosa de forma vertical con una navaja, busque un sutil oscurecimiento en la zona de la médula interna o en los vasos conductores del cuello."
+        },
+        {
+          "section": "Detalle Enfermedades!F5:G5",
+          "text": "F5: Líneas oscuras basales: En la base del tallo joven (cerca de la línea del suelo o el cuello de la raíz), pueden aparecer estrías o líneas longitudinales de color marrón rojizo, que avanzan muy lentamente hacia los pecíolos de las hojas unifoliadas. | G5: Lotes con rastrojo denso: Preste máxima atención a los sectores de la parcela donde quedó acumulado el rastrojo de la soja de la campaña anterior, ya que allí se concentran las esporas latentes."
+        },
+        {
+          "section": "Detalle Enfermedades!F6:G6",
+          "text": "F6: Aspecto de \"hollín\" o puntos negros: En los tejidos de los cotiledones ya secos o caídos, se pueden formar diminutos puntos negros (picnidios) ordenados en hileras. | G6: Monitoree los sectores del lote que acumularon agua tras las últimas lluvias, ya que el exceso de humedad gatilla la liberación de las esporas del hongo."
+        },
+        {
+          "section": "Detalle Enfermedades!G7:G7",
+          "text": "G7: Prueba de cámara húmeda: Colocar plantas jóvenes afectadas en una bolsa plástica con una servilleta de papel húmeda por 48 horas obligará al hongo a expresar sus estructuras reproductivas (los puntos negros o picnidios) de forma visible."
+        },
+        {
+          "section": "Detalle Enfermedades!C8:M8",
+          "text": "C8: Septoria glycines | D8: Mancha Marrón | E8: V2 a V4 | F8: Manchas pequeñas y angulares: Se forman manchas de tamaño milimétrico (de 1 a 4 mm), con contornos irregulares o angulares, de un color marrón chocolate o marrón oscuro. | G8: Agáchese y aparte las hojas superiores. El foco de inspección debe estar en los primeros 10 a 15 centímetros de la planta (el cuello, las unifoliadas y los primeros trifolios inferiores). Busque las plantas que estén naciendo inmediatamente al lado o atravesando rastrojo grueso de soja | H8: Mayor a 5 mm, (chaparrón o tormenta corta)\n\n35 y 50 mm de lluvia a partir de R1. | I8: 6 a 12 horas consecutivas  | J8: 75% o 80%. Por 24 a 48 horas continuas. | K8: 60% por 24 hs | L8: 21 °C a 25 °C por 6 a 12 horas continuas. | M8: 15 ºC a 20 ºC"
+        },
+        {
+          "section": "Detalle Enfermedades!F9:G9",
+          "text": "F9: Halo amarillento (Clorosis): El tejido que rodea a las manchas marrones se vuelve de un color amarillo intenso. Este halo clorótico es muy característico y se expande a medida que la enfermedad progresa. | G9: Dirección del avance: Verifique si las manchas ya empezaron a colonizar el estrato medio de la planta. Si en V5 las manchas ya saltaron de las unifoliadas al segundo o tercer trifolio, significa que la enfermedad tiene un progreso vertical agresivo debido a lluvias recientes."
+        },
+        {
+          "section": "Detalle Enfermedades!F10:G10",
+          "text": "F10: Necrosis y desprendimiento: Si las condiciones de lluvias continúan, las manchas se unen (coalescen), provocando que la hoja unifoliada se seque por completo, se vuelva quebradiza y caiga prematuramente al suelo (defoliación temprana). | G10: * Frente a Mancha Ojo de Rana (Cercospora sojina): Las manchas de Septoria son marrón oscuro uniforme y angulares. Las de Ojo de Rana son circulares, tienen el centro gris claro o blanquecino y un borde marrón rojizo muy marcado. Además, Ojo de Rana suele aparecer más arriba en el dosel."
+        },
+        {
+          "section": "Detalle Enfermedades!G11:G11",
+          "text": "G11: * Frente a Tizón Bacteriano (Pseudomonas syringae): El tizón bacteriano también genera manchas oscuras con halos amarillos, pero estas suelen comenzar en los bordes de la hoja (puntas quemadas) y al tacto o con el rocío de la mañana, la lesión bacteriana tiene un aspecto translúcido o acuoso, mientras que la lesión por Septoria es completamente seca."
+        },
+        {
+          "section": "Detalle Enfermedades!C12:M12",
+          "text": "C12: Microsphaera diffusa | D12: Oídio  | E12: V5 a V6 | F12: Fase Inicial (Puntos blancos aislados): Los primeros síntomas aparecen como pequeñas manchas circulares de color blanco o grisáceo sobre la cara superior (haz) de las hojas más viejas o del estrato inferior de la planta. | G12: El Tercio Inferior (Hojas más viejas): Es el primer lugar donde debe mirar. Las primeras infecciones se asientan en las hojas sombreadas de la base de la planta. Busque allí los primeros puntos blancos aislados.\nLa Prueba del Dedo o Frotado: Pase la yema del dedo sobre la hoja afectada con una leve presión. Si es oídio, el polvo blanco se desprende fácilmente, quedando retenido en su dedo y dejando ver el tejido verde o levemente necrosado de la hoja abajo. Si es polvo del camino o tierra, se sentirá áspero y no revelará lesiones en el tejido. | H12: 0 (mm) | I12: 0 (mm) | J12: 70% [valor interno 0.7] | K12: 30% [valor interno 0.3] | L12: 18 - 24 | M12: 15 - 20"
+        },
+        {
+          "section": "Detalle Enfermedades!F13:G13",
+          "text": "F13: Fase de Expansión (El \"Polvillo\" Harinoso): Esas manchas crecen y se unen rápidamente, cubriendo la hoja con una capa harinosa o algodonosa blanquecina muy característica. Esta capa está formada por los micelios y las millones de esporas del hongo. | G13: Corte con Lupa de Mano: Si observa de cerca con una lupa de campo (10x o 20x), el polvo blanco no se ve liso, sino como un entramado de pequeños hilos transparentes interconectados (micelio) con cadenas de esporas alargadas que sobresalen hacia arriba."
+        },
+        {
+          "section": "Detalle Enfermedades!F14:G14",
+          "text": "F14: Afección Sistémica: Si el clima fresco y seco continúa, el polvo blanco trepa hacia las hojas más jóvenes del tercio superior y coloniza de forma agresiva los tallos, pecíolos y vainas. | G14: Una vez que la enfermedad se establece, trepa rápidamente hacia las hojas de la zona media. Este es el estrato más crítico para monitorear, ya que define el umbral de decisión para aplicar fungicidas."
+        },
+        {
+          "section": "Detalle Enfermedades!F15:G15",
+          "text": "F15: Daño Foliar Avanzado: El tejido verde debajo del hongo comienza a morir. Las hojas pierden elasticidad, se arrugan, se curvan hacia arriba, adquieren un color amarillento o bronceado y sufren una defoliación (caída) prematura, dejando las vainas expuestas al sol. | G15: \n* Atencio de confundir con Arañuela Roja (Tetranychus urticae): La arañuela también ataca en años secos y causa un color blanquecino/pálido en el follaje. Sin embargo, la arañuela teje telas densas principalmente en el envés (cara inferior) de la hoja y genera una decoloración en forma de finos puntos amarillos, mientras que el oídio se concentra de forma masiva en el haz (cara superior) como una costra harinosa."
+        },
+        {
+          "section": "Detalle Enfermedades!G16:G16",
+          "text": "G16: Si las condiciones climáticas son secas y frescas por mucho tiempo, el hongo deja de limitarse a las hojas y comienza a cubrir con una costra harinosa los tallos y las vainas en desarrollo."
+        },
+        {
+          "section": "Detalle Enfermedades!A17:L17",
+          "text": "A17: Etapas Reproductivas  | B17: R1 a R5 | C17: Phakopsora pachyrhizi | D17: Roya Asiática | E17: R1 - R2 | F17: Síntomas Iniciales (Fase Temprana)\nPuntos diminutos: Aparecen pequeñas manchas de color grisáceo, marrón-rojizo o bronceado (lesiones tipo TAN o RB), con un diámetro menor a 1 milímetro.\nInicio en la base: Las lesiones comienzan de forma exclusiva en el tercio inferior de la planta (hojas basales), debido al sombreado y la retención de humedad en esa zona.\nEfecto al trasluz: Si se coloca la hoja contra la luz del sol, estas pequeñas manchas se observan translúcidas antes de hacerse visibles a simple vista. | G17: * Dirígete a las zonas del lote con mayor densidad de plantas, lugares bajos donde se acumule más humedad, o borduras cercanas a montes y cortinas de viento donde el rocío permanezca más tiempo.\n* Los síntomas se concentran exclusivamente en el tercio inferior de la planta (hojas basales). A simple vista, notarás un leve amarilleo generalizado o una decoloración estilo \"mosaico\" en esas hojas inferiores.  | H17: luvias permanentes con frecuencias semanales de entre 5 a 10 mm | I17: 6-12 horas | J17: 90% por más de 12 horas | L17: 18 °C y 26,5 °C"
+        },
+        {
+          "section": "Detalle Enfermedades!F18:G18",
+          "text": "F18: Síntomas Avanzados (Fase de Fructificación)\nPústulas tridimensionales (Signo clave): En el envés (cara inferior) de la hoja, las manchas desarrollan relieve y se transforman en pequeñas ampollas llamadas uredias.\nAspecto de \"volcán\": Al madurar, las pústulas se abren mediante un poro central y liberan un polvillo fino de esporas de color beige, crema o marrón claro.\nLesiones angulares: Con el tiempo, las manchas individuales crecen, se vuelven de color marrón oscuro a negro y quedan delimitadas por las nervaduras de la hoja, adquiriendo formas angulares. | G18: * Qué hojas colectar: Revisa el tercio inferior de la planta. Desprende hojas de los nudos inferiores que comiencen a mostrar un ligero tono amarillento o un sombreado inusual, incluso si parecen sanas a primera vista. \n* Haz de la Hoja (Cara Superior): Aparecen puntos diminutos de color marrón-rojizo o bronceado (lesiones tipo TAN o RB), de aproximadamente 1 mm de diámetro. Al trasluz de la luz solar, estas áreas infectadas se ven ligeramente translúcidas."
+        },
+        {
+          "section": "Detalle Enfermedades!F19:G19",
+          "text": "F19: Síntomas Tardíos (Fase Severa)\nClorosis generalizada: Las hojas afectadas pierden su color verde y se vuelven completamente amarillas debido a la destrucción de la clorofila.\nDefoliación prematura: Las plantas pierden sus hojas de manera anticipada (empezando desde abajo hacia arriba), desnudando el cultivo.\nMaduración anticipada y grano dañado: Al quedarse sin hojas para realizar fotosíntesis, el ciclo del cultivo se acorta drásticamente, impidiendo el llenado de los granos, los cuales quedan pequeños, arrugados y livianos. | G19: Toma el folíolo por el pecíolo y colócalo hacia el sol (al trasluz). Busca puntos oscuros muy pequeños (menores a 1 mm). Si la infección es por Roya, notarás que el tejido alrededor de esos puntos se ve translúcido, como si la hoja estuviera \"perforada\" microscópicamente por la luz."
+        },
+        {
+          "section": "Detalle Enfermedades!F20:G20",
+          "text": "F20: Lesiones Tipo TAN (Susceptibles / Altamente Agresivas)\nSon las lesiones más comunes y peligrosas en los lotes comerciales de soja.\nColor: Marrón claro, beige o bronceado (tan en inglés).\nCaracterísticas: Son lesiones típicamente angulares (delimitadas por las nervaduras de la hoja).\nFructificación: Tienen una alta densidad de pústulas (uredias) por lesión. Cada mancha produce una gran cantidad de volcanes que liberan masas abundantes de esporas de color crema.\nImpacto: Indican que la planta no tiene defensas contra esa cepa del hongo. La enfermedad se propagará de forma muy rápida y destructiva si el clima acompaña. | G20: Aspecto de \"Volcán\": Con la ayuda de una lupa de campo (mínimo 20x), verás que estas pústulas maduran abriendo un pequeño poro central para liberar esporas de color beige o marrón claro. Esta estructura es la única manera de confirmar la roya y no confundirla con otras enfermedades como la Mancha Marrón (Septoria glycines) o daños por trips"
+        },
+        {
+          "section": "Detalle Enfermedades!F21:G21",
+          "text": "F21: Lesiones Tipo RB (Red-Brown / Resistencia Parcial)\nSon el resultado de una reacción de hipersensibilidad o resistencia incompleta de la planta frente al patógeno.\nColor: Marrón-rojizo oscuro (Red-Brown).\nCaracterísticas: Aparecen como puntos o manchas oscuras debido a que las células de la planta se \"suicidan\" (necrosis celular) alrededor del hongo para intentar frenar su avance.\nFructificación: Tienen muy pocas pústulas o ninguna. Si llegan a desarrollar pústulas, estas liberan una cantidad mínima de esporas.\nImpacto: El avance de la enfermedad en el lote es mucho más lento. Sin embargo, no te debes confiar, ya que el hongo puede mutar o quebrar esta resistencia si la presión de esporas en la zona es muy alta. | G21: * La Roya es una de las pocas enfermedades fúngicas que produce estructuras en relieve (pústulas). Gira la hoja para examinar el envés (cara inferior) utilizando una lupa de 10x o, preferentemente, 20x\n* Envés de la Hoja (Cara Inferior - Clave de Diagnóstico): Pústulas en desarrolloPasa la yema del dedo o un pañuelo blanco suavemente sobre el envés de la hoja afectada, Si tus dedos quedan impregnados con un polvillo suelto de color claro/crema, estás ante una masa de urediniosporas activas de Roya liberándose en el lote."
+        },
+        {
+          "section": "Detalle Enfermedades!C22:M22",
+          "text": "C22:  Cercospora kikuchii | D22: Tizón de la hoja | E22: R3 - R5 | F22: En las hojas: Aparece un plateado o bronceado característico en la cara superior (haz) de las hojas del tercio superior, que luego toma un color violáceo/púrpura oscuro. Las hojas se vuelven coriáceas (duras y de textura de cuero) y se caen prematuramente. | G22: Al recorrer el campo, dirigir tu mirada exclusivamente al tercio superior de la planta (las hojas más nuevas y expuestas al sol), a diferencia de la mancha marrón que empieza desde abajo | H22: 50 a 60 mm durante la etapa de floración y formación de vainas (R1 a R4), | I22: 8 a 16 horas | J22: superior al 85% - 90% | K22: no afecta directamente | L22: 23 °C a 30 °C | M22: no afecta directamente"
+        },
+        {
+          "section": "Detalle Enfermedades!F23:G23",
+          "text": "F23: Manchas en los pecíolos: Si sigues la hoja hacia el tallo, verás en los pecíolos unas manchas alargadas (estrías) de color púrpura oscuro o rojizo. Este es un signo de confirmación muy confiable en el campo. | G23: Frente a la Mancha Marrón (Septoria): La mancha marrón avanza de abajo hacia arriba y produce puntos oscuros y angulares. El tizón de Cercospora ataca de arriba hacia abajo y tiñe la hoja de forma generalizada (área continua purpúrea/bronceada)."
+        },
+        {
+          "section": "Detalle Enfermedades!F24:G24",
+          "text": "F24: En las semillas: Causa la típica mancha púrpura, que afecta la calidad comercial y el poder germinativo de la semilla si se guarda para la próxima siembra. | G24: Frente a Fitotoxicidad por aplicación: Las quemaduras por agroquímicos suelen marcar los bordes de las hojas o dejar gotas perfectamente delimitadas en todo el lote de forma uniforme. El tizón aparece manchando la lámina completa de las hojas del estrato superior y avanza de forma progresiva según el ambiente."
+        },
+        {
+          "section": "Detalle Enfermedades!F25:G25",
+          "text": "F25: Defoliación prematura: Las hojas afectadas se caen rápidamente, pero con una particularidad: a menudo caen las láminas foliares y quedan los pecíolos adheridos al tallo, dándole a la planta un aspecto pelado en la punta. | G25: Frente a Estrés Térmico (Golpe de calor): El estrés por calor seca los bordes o daña hojas sin alterar la textura ni teñirlas de color púrpura/violáceo, y no genera las estrías oscuras en los pecíolos."
+        },
+        {
+          "section": "Detalle Enfermedades!C26:M26",
+          "text": "C26: Cercospora sojina | D26: Mancha ojo de Rana (MOR) | E26: V6 - R7 | F26: Principalmente en las hojas, aunque también se pueden observar en menor medida en tallos, vainas y semillas, los primeros síntomas pueden observarse tanto en estadios vegetativos como reproductivos. \n | G26: Recorrer\n Zonas con rastrojo denso: Sectores donde el cultivo antecesor fue soja y hay mucha cobertura vegetal en el suelo\nBajos y áreas protegidas: Sectores bajos del lote, zonas cercanas a cortinas de árboles o áreas donde el viento disminuye. Allí el rocío tarda más en secarse y las horas de mojado foliar son mayores\nZonas de alta densidad: Lugares donde las plantas estén más juntas o el entresurco se haya cerrado antes, lo que genera un microclima interno más húmedo. | H26: se dispara según la cantidad de días con precipitaciones superiores a los 7 mm | I26: 8 y 24 horas continuas de mojado | J26: Superior al 90% | K26: no afecta directamente | L26: 25 °C a 30 °C durante el día\n iguales o superiores a 20 °C de noche | M26: no afecta directamente"
+        },
+        {
+          "section": "Detalle Enfermedades!F27:G27",
+          "text": "F27: Consisten en manchas circulares a angulares, de 1 a 2 mm, aunque pueden ser más grandes, de centro color gris ceniza y borde marrón-rojizo, sin halo clorótico. \nLas lesiones se observan primero en la cara superior de la hoja pero luego también en la inferior (con centro más oscuro y abundante esporulación en condiciones de alta humedad). Las hojas jóvenes son más afectadas. | G27: Mirar\nTercio inferior y medio: El hongo proviene del suelo. Las primeras infecciones (inóculo primario) aparecen siempre en las hojas más viejas y bajas, que reciben la salpicadura de la lluvia.\nHojas jóvenes en cultivares susceptibles: Si la variedad de soja no es resistente y el clima es óptimo, el hongo asciende rápidamente. Revisa los brotes nuevos del tercio superior, ya que los tejidos jóvenes son muy susceptibles a la germinación de las esporas suspendidas en el aire (inóculo secundario)."
+        },
+        {
+          "section": "Detalle Enfermedades!G28:G28",
+          "text": "G28: Busca con una lupa de mano\nBorde marrón-rojizo y centro gris: Busca manchas circulares o angulares (de 1 a 5 mm). El centro de la mancha debe verse color ceniza/grisáceo y el borde muy bien delimitado de un color marrón rojizo o púrpura.\nAusencia de halo amarillo: A diferencia de la Mancha marrón (Septoria) o el Tizón bacteriano, las lesiones de la mancha ojo de rana no tienen un contorno amarillento alrededor del borde marrón.\nEl \"signo\" en el envés (cara inferior): Da vuelta la hoja afectada. Si la humedad ha sido alta, en el centro gris de la mancha (por el envés) verás unas pequeñas puntuaciones oscuras o una especie de \"felpa\" gris oscura. Esas son las estructuras del hongo (conidióforos) produciendo esporas.\nTallos y vainas (en estadios avanzados): A partir de R5 (llenado de granos), si la presión es muy alta, mira si hay lesiones alargadas en los tallos o manchas circulares hundidas en las vainas, lo que puede terminar infectando los granos."
+        },
+        {
+          "section": "Detalle Enfermedades!C29:M29",
+          "text": "C29: Colletotrichum truncatum | D29: Antracnosis | E29: R6  -R8 | F29: En plántulas (Fase temprana / Damping-off)\nMuerte en pre y post-emergencia: La semilla se pudre antes de nacer o la plántula muere a los pocos días de emerger.\nCancros en cotiledones: Las primeras dos hojitas gruesas (cotiledones) muestran manchas hundidas de color marrón oscuro que terminan secando la plántula. | G29: Que mirar\nFase vegetativa (Temprana): Puede causar muerte de plántulas (damping-off) si la semilla ya estaba infectada, o provocar manchas oscuras y cancros en los cotiledones y el tallo.\n\n | H29: 50 a 60 mm de lluvia a partir del estadio R3 (inicio de formación de vainas) hasta R5 (inicio de llenado de granos) | I29: más de 12 a 24 horas continuas | J29: cercana al 100%  | K29: no afecta directamente | L29: 28 °C y 32 °C | M29: no afecta directamente"
+        },
+        {
+          "section": "Detalle Enfermedades!F30:G30",
+          "text": "F30: En los tallos y pecíolos (Hojas)\nEstrías negras y alargadas: En la superficie de los tallos y en las ramificaciones aparecen manchas o líneas alargadas de color marrón rojizo que luego se vuelven completamente negras.\nPecíolos caídos en \"gancho\": El hongo ataca el pecíolo (el \"palito\" que sostiene la hoja). La hoja se seca y cae, pero el pecíolo infectado se vuelve negro, muere y queda adherido al tallo principal, apuntando hacia abajo en forma de gancho. Este es un síntoma visual muy típico de la antracnosis. | G30: Que mirar\nFase reproductiva (Avanzada - R5 en adelante): Es el momento de mayor impacto.\nEn tallos y pecíolos: Aparecen manchas o estrías longitudinales de color marrón rojizo a negro, de bordes difusos. Con alta humedad, estas manchas se cubren de unas pequeñas estructuras negras con forma de agujas llamadas setas (visibles con lupa).\nEn vainas (El daño más grave): Provoca manchas oscuras, hundidas e irregulares. Si la infección es temprana en la vaina, causa el aborto de flores y vainas, o produce vainas vanas (sin granos). Si el grano llega a formarse, sale pequeño, arrugado, mohoso y con manchas marrón oscuro.\nDefoliación: Los pecíolos se vuelven negros y las hojas caen prematuramente, pero a menudo los pecíolos infectados quedan colgados del tallo apuntando hacia abajo."
+        },
+        {
+          "section": "Detalle Enfermedades!F31:F31",
+          "text": "F31: En las vainas (El daño más grave y visible)A partir del estadio R5 (llenado de granos), las vainas son el blanco principal del hongo:\nManchas hundidas y oscuras: Aparecen lesiones de color marrón oscuro a negro, de forma irregular y aspecto \"hundido\".\nAborto de vainas: Si el hongo ataca temprano (en R3-R4), las vainas se vuelven completamente negras, mueren y caen (aborto), o quedan vanas (secas y sin granos dentro).\nDaño al grano: Si la vaina sobrevive, el hongo atraviesa la pared e infecta los granos. Al abrir la vaina, notarás granos pequeños, arrugados, cubiertos por un moho blanco-grisáceo o con manchas pálidas."
+        },
+        {
+          "section": "Detalle Enfermedades!C32:M32",
+          "text": "C32: Macrophomina phaseolin | D32: Pudrición Carbonosa de la raíz  | E32: R5 - R7 | F32: Síntomas en la raíz y la base del tallo\nAspecto carbonoso: La médula y los tejidos internos se llenan de miles de pequeños puntos negros. Esto le da a la raíz y al tallo un color gris ceniza o negro brillante.\nDesprendimiento de corteza: Los tejidos externos de la raíz principal se vuelven secos y se descascaran con extrema facilidad al tacto.\nPudrición seca: A diferencia de otros hongos, no genera una consistencia blanda o acuosa; las raíces se vuelven quebradizas y leñosas. | G32: Desde la floración en adelante, revisar con atención el tercio inferior de las plantas\nDónde mirar en el lote? (Zonas críticas)\nCabeceras y zonas de pisoteo: Donde las maquinarias compactan más el suelo.\nManchones marchitos: Áreas del lote donde las plantas se vean amarillas, secas o muertas antes de tiempo (en parches o rodales).\nLomas y pendientes: Sectores con menor retención de humedad y suelos más arenosos o playeros. | H32: 0 mm | I32: 1 a 2 horas | J32: inferior a 60% | K32: inferior a 50%  | L32: Entre los 25 °C y 35 °C | M32: Entre 28 °C y 35 °C"
+        },
+        {
+          "section": "Detalle Enfermedades!F33:G33",
+          "text": "F33: Síntomas en la parte aérea (Hojas y ramas)\nMarchitamiento repentino: Las hojas pierden rigidez rápidamente y se secan, pero quedan adheridas a la planta sin caerse.\nMaduración prematura: El cultivo detiene su desarrollo antes de tiempo, lo que provoca una caída drástica en el rendimiento y granos o frutos más pequeños y arrugados.\nClorosis: Antes de secarse por completo, las hojas suelen mostrar un amarillamiento progresivo que avanza desde las puntas hacia el centro. | G33: Qué mirar en la planta entera? (Inspección visual aérea)\nHojas retenidas: Plantas muertas o marchitas que mantienen sus hojas secas pegadas a las ramas (no se caen).\nDefoliación o madurez anticipada: Grupos de plantas que se están secando notablemente antes que el resto del lote sano."
+        },
+        {
+          "section": "Detalle Enfermedades!G34:G34",
+          "text": "G34: Qué y cómo revisar al arrancar la planta? (El diagnóstico definitivo)\nSelecciona las plantas sospechosas, arráncalas con cuidado (no las cortes) para extraer la mayor cantidad de raíz posible, y realiza lo siguiente:\nTira de la corteza: Pasa los dedos por la raíz principal. Si la corteza se desprende o se descascara con extrema facilidad, es una alerta alta.\nObserva el color externo: Busca un tono grisáceo, ceniza o negruzco en la zona del cuello (donde el tallo se une a la raíz).\nHaz un corte longitudinal: Corta el tallo principal y la raíz al medio con una navaja o cuchillo afilado.\nMira la médula: Si está deshilachada, seca y con un aspecto salpicado de \"polvo de carbón\" o \"hollín\" (los microesclerocios), el diagnóstico está confirmado."
+        },
+        {
+          "section": "Detalle Enfermedades!C35:M35",
+          "text": "C35: Pseudomonas savastonoi  pv. glycinea | D35: Tizón bacteriano de la soja | E35: R6 - R8 | F35: En las Hojas (El síntoma principal)\nManchas angulares: Comienza como pequeñas manchas acuosas (aspecto aceitoso) en las hojas, que luego se vuelven de color marrón translúcido a negro. Tienen formas angulares porque están delimitadas por las nervaduras de la hoja.\nLesiones angulares oscuras: Con los días, estas manchas se vuelven de color marrón rojizo, marrón oscuro o completamente negras. Tienen bordes rectos y formas angulares muy marcadas debido a que están delimitadas por las nervaduras de la hoja.\nHalo amarillo (Clorótico): Las manchas oscuras siempre están rodeadas por un característico borde o halo de color amarillo brillante. Esto ocurre por las toxinas que libera la bacteria al destruir el tejido.\nEfecto \"perdigonado\" o deshilachado: Cuando la infección avanza y el clima se vuelve seco o ventoso, el centro de las manchas viejas se seca por completo, se vuelve quebradizo y se desprende, dejando la hoja llena de agujeros (como si hubiera recibido un disparo de perdigones) o con los bordes totalmente rotos. | G35: En el tercio superior de la planta\nDónde mirar en el lote? (Zonas críticas)\nZonas expuestas al viento dominante: Sectores del lote donde las tormentas golpean con más fuerza.\nÁreas bajas o propensas a encharcamientos: Lugares donde el suelo retiene agua en la superficie por más tiempo, facilitando el salpicado inicial de la bacteria desde el suelo.\nZonas afectadas por granizo o tormentas fuertes: Cualquier sector del campo que haya sufrido daños climáticos recientes (fricción por viento fuerte o impacto de granizo). | H35: Continua | I35: 6 a 8 horas | J35: 80% o 85% | K35: 70% o 80% | L35: 20 °C y 26 °C. | M35: 10 °C y 20 °C."
+        },
+        {
+          "section": "Detalle Enfermedades!F36:G36",
+          "text": "F36: En los Tallos y Pecíolos\nLíneas o estrías negras: Si la bacteria avanza desde la hoja hacia el resto de la planta, verás manchas alargadas de color marrón oscuro o negro que corren a lo largo de los pecíolos (el \"cabito\" de la hoja) y en los nudos del tallo principal. | G36: Qué mirar en la planta? (Inspección del dosel)\nEl tercio superior: Enfoca tu mirada en las hojas más jóvenes y tiernas (las de arriba). Al ser las más expuestas al golpe de la lluvia y el viento, suelen mostrar los primeros síntomas.\nEfecto \"perdigonado\" o deshilachado: Busca plantas cuyas hojas superiores parezcan rotas en los bordes o llenas de pequeños agujeros, como si hubieran sido dañadas por insectos o por un disparo de perdigones."
+        },
+        {
+          "section": "Detalle Enfermedades!F37:G37",
+          "text": "F37: En las Vainas (Chauchas)\nManchas circulares acuosas: En las vainas en desarrollo aparecen pequeñas lesiones redondeadas que al principio parecen húmedas.\nCostras oscuras: Con el tiempo, estas manchas se vuelven de color marrón oscuro a negro. Si la infección progresa hacia el interior, puede llegar a manchar o pudrir el grano de soja en formación, reduciendo su calidad y poder germinativo. | G37: Qué observar al revisar las hojas de cerca? (El diagnóstico definitivo)\nToma las hojas sospechosas y colócalas a contraluz para evaluar tres detalles clave:\nForma angular de las manchas: Verifica si las lesiones oscuras (marrones o negras) tienen bordes rectos que siguen las nervaduras de la hoja, formando figuras geométricas o ángulos.\nEl halo amarillo brillante: Asegúrate de que alrededor de cada mancha oscura haya un borde circular de color amarillo muy marcado (provocado por las toxinas bacterianas).\nAspecto aceitoso o acuoso: Revisa el envés (la parte de atrás) de las hojas más jóvenes infectadas. Al inicio de la enfermedad, las manchas tienen un aspecto húmedo o grasoso, a diferencia de los hongos que suelen ser secos desde el principio."
+        },
+        {
+          "section": "Detalle Enfermedades!C38:M38",
+          "text": "C38: Xanthomonas axonopodis pv. glycines | D38: Pústula bacteriana  | E38: R2 a R6 | F38: En las hojas (Síntoma principal)\nPuntos amarillentos: Al inicio de la infección aparecen pequeñas manchas de color verde pálido a amarillo en el haz (cara superior) de la hoja.\nPústulas elevadas: En el centro de estas manchas, principalmente en el envés (cara inferior), se desarrollan pequeñas pústulas de color marrón claro o beige. Tienen un aspecto similar a un volcán microscópico o una erupción en relieve.\nNecrosis central: Con el tiempo, el centro de las manchas se vuelve marrón oscuro o rojizo, y el tejido afectado muere.\nHalo clorótico: Las lesiones suelen estar rodeadas de un halo amarillo bien definido.\nDesgarre del tejido: Si las manchas se unen, forman grandes parches secos que se rompen con el viento, dándole a la hoja un aspecto roto o deshilachado.\nDefoliación temprana: En ataques severos, las hojas se vuelven amarillas por completo y caen antes de tiempo. | G38: Dónde mirar\nEstrato medio e inferior: La enfermedad suele arrancar en las hojas de abajo, que es donde impactan las primeras salpicaduras de lluvia desde el rastrojo, y luego asciende hacia el tercio superior.\nFollaje expuesto al viento: Revisa con atención las zonas del lote donde el viento o las tormentas recientes hayan causado rozamiento o daños en las hojas, ya que las microheridas son la puerta de entrada de la bacteria.\nEn el haz (cara superior de la hoja): Busca pequeñas manchas de color verde pálido a amarillento, que con los días desarrollan un centro seco de color marrón rojizo o castaño. Generalmente están rodeadas por un halo amarillo difuso.\nEn el envés (cara inferior de la hoja - ¡El paso más importante!): Da vuelta la hoja. Justo en el centro de esas manchas amarillas notarás una pequeña protuberancia o relieve, de color beige o marrón claro. Parece una pequeña ampolla o erupción volcánica microscópica. | H38: 7 mm en un solo evento | I38: 4 a 6 horas | J38: 85% al 100% | K38: encima del 30% - 35% | L38: 30 °C y 33 °C | M38: >25 °C a 30 °C"
+        },
+        {
+          "section": "Detalle Enfermedades!F39:G39",
+          "text": "F39: En vainas y tallos (Menos comunes)\nManchas rojizas: En las vainas de variedades susceptibles pueden aparecer manchas circulares de color marrón rojizo, que en ocasiones también desarrollan pequeñas elevaciones o pústulas. | G39:  La prueba táctil (El \"paso del dedo\")\nPasa la yema de tus dedos suavemente por el envés de la hoja afectada. Si sientes una textura rugosa, áspera o con relieve, estás ante la presencia de pústulas."
+        },
+        {
+          "section": "Conversion!A1:A1",
+          "text": "A1: equivalencia aproximada entre Centibares"
+        },
+        {
+          "section": "Conversion!A3:A3",
+          "text": "A3: Tabla de conversión aproximada (Centibares a % de Humedad)"
+        },
+        {
+          "section": "Conversion!A4:E4",
+          "text": "A4: Lectura en Sensor (Centibares / kPa) | B4: Estado del Suelo | C4: Suelo Arenoso (% Humedad) | D4: Suelo Franco (% Humedad) | E4: Suelo Arcilloso (% Humedad)"
+        },
+        {
+          "section": "Conversion!A5:E5",
+          "text": "A5: 0 a 10 cB | B5: Saturado (Exceso de agua / Sin oxígeno) | C5: > 30% | D5: > 40% | E5: > 50%"
+        },
+        {
+          "section": "Conversion!A6:E6",
+          "text": "A6: 10 a 30 cB | B6: Capacidad de Campo (Humedad ideal para la planta) | C6: 10% a 15% | D6: 22% a 30% | E6: 32% a 40%"
+        },
+        {
+          "section": "Conversion!A7:E7",
+          "text": "A7: 30 a 60 cB | B7: Humedad disponible (Estrés leve iniciando en arenas) | C7: 6% a 9% | D7: 15% a 21% | E7: 25% a 31%"
+        },
+        {
+          "section": "Conversion!A8:E8",
+          "text": "A8: 60 a 100 cB | B8: Suelo Seco (Estrés hídrico moderado a severo) | C8: < 5% | D8: 10% a 14% | E8: 18% a 24%"
+        },
+        {
+          "section": "Conversion!A9:E9",
+          "text": "A9: > 100 cB | B9: Punto de Marchitez (Suelo críticamente seco) | C9: Próximo a 0% | D9: < 9% | E9: < 15%"
+        }
+      ]
+    },
+    {
+      "document": "Soja fenologia y Clima para agrobuch.xlsx",
+      "sha256": "517cc4fb5a3a83031cee0564e96ad482f515e6636ac075e89a3a193dd7c74b4a",
+      "crop": "SOJA",
+      "sections": [
+        {
+          "section": "Control y seguimiento!B1:B1",
+          "text": "B1: Actividades a Desarrollar para Técnicos Responsables de Parcelas "
+        },
+        {
+          "section": "Control y seguimiento!B2:W2",
+          "text": "B2: Etapas | C2: Estado | D2: Duracion | E2: Fecha | F2: Manejo | G2: Productos a Utilizar | H2: Monitorear | I2: Fecha de realización | J2: Requerimiento de Agua | L2: Requerimiento Temperatura | O2: Reduccion por estrés Hidrico | P2: Imagen | Q2: Grafico | R2: Identificacion | S2: Duracion aprox (dias) | W2: Para produccion de 4000 kg/ha"
+        },
+        {
+          "section": "Control y seguimiento!B3:V3",
+          "text": "B3: Preparación de Suelo | C3: Desecacion | D3: -15 | E3: 42236 [fórmula: E6+D3] | F3: Desecación | G3: Glifosato; Diquat; Paraquat; 2,4 D entre otros | I3: 15 Días antes de la Siembra | L3: dia | M3: Noche | N3: General | S3: Precoz | T3: Semi precoz | U3: Medio  | V3: Tardio"
+        },
+        {
+          "section": "Control y seguimiento!D4:I4",
+          "text": "D4: -3 | E4: 42248 [fórmula: E6+D4] | F4: Acame | G4: Rolo cuchilla | I4: 3 Días antes de la Siembra"
+        },
+        {
+          "section": "Control y seguimiento!B5:I5",
+          "text": "B5: Siembra | C5: Trat. Semillas | D5: -1 | E5: 42250 [fórmula: E6+D5] | F5: Tratamiento de Semillas | G5: Fipronil (24ml) + Carboxin + Thiran (90ml) | I5: 1 Día antes de la Siembra"
+        },
+        {
+          "section": "Control y seguimiento!C6:W6",
+          "text": "C6: Siembra  | E6: 42251 | F6: Aplicación de Tratamientos (Dosis de Fertilizantes) | G6: Fertilizantes | I6: Durante la Siembra | K6: 80 mm de lluvia total | L6: 25ºC | W6: Control de Orugas cortadoras, Aves y liebres principalmente "
+        },
+        {
+          "section": "Control y seguimiento!F7:G7",
+          "text": "F7: Cercado de plástico contra roedores | G7: Malla plástica y Estacas"
+        },
+        {
+          "section": "Control y seguimiento!F8:M8",
+          "text": "F8: Instalación de Sistema de Riego | G8: Cinta de goteo, Caños plásticos, etc. | L8: 30ºC a 35ºC\nDiurno | M8: 21ºC a 27ºC\nNocturno"
+        },
+        {
+          "section": "Control y seguimiento!B9:R9",
+          "text": "B9: Monitoreo y Cuidados Culturales | C9: VE | D9: 5 | E9: 42256 [fórmula: E6+D9] | F9: Observación y monitoreo de plagas y enfermedades - Riego de Parcela | H9: Fallas de siembra / Nodulacion / Raices | I9: 2 veces por semana desde la siembra (cada 3 o 4 días como máximo) | J9: requiere 3 mm/dia | O9: 10% [valor interno 0.1] | R9: VE: Emergencia de los cotiledones sobre la superficie del suelo"
+        },
+        {
+          "section": "Control y seguimiento!C10:V10",
+          "text": "C10: V1 | D10: 14 | E10: 42265 [fórmula: E6+D10] | F10: Aplicación de insecticida (1era aplicación) | G10: Cloropirifos + cipermetrina (1 L/ha) | I10: 14 Días Después de la Siembra (DDS) | R10: V1: Primer Nudo, primera hoja trifoliada abieta, sin que se toquen los bordes de cada foliolo\n\nAltura de 10 a 15 cm | S10: 56 | T10: 59 | U10: 63 | V10: 66"
+        },
+        {
+          "section": "Control y seguimiento!C11:R11",
+          "text": "C11: V2 a V4 | F11: Observación y monitoreo de plagas y enfermedades - Riego de Parcela | I11: 2 veces por semana desde la siembra  | K11: 40 mm de lluvia total | R11: Vn: Del V2 hasta Vn indica la cantidad de trifolios totalmente desarrollados\n\nAltura a V9  de 35 a 40 cm"
+        },
+        {
+          "section": "Control y seguimiento!C12:K12",
+          "text": "C12: V5 | D12: 33 | E12: 42284 [fórmula: E6+D12] | F12: Control de Malezas (aplicación de herbicidas) | G12: Glifosato (300 cc/mochila) | H12: Nº de plantas /ha\nCantidad de nudos / planta | I12: 30 DDS | K12: 80 mm de lluvia en total"
+        },
+        {
+          "section": "Control y seguimiento!F13:I13",
+          "text": "F13: Aplicación de Insecticida (2da aplicación) | G13: Cloropirifos + cipermetrina (1 L/ha) | I13: 30 DDS"
+        },
+        {
+          "section": "Control y seguimiento!F14:I14",
+          "text": "F14: Observación y monitoreo de plagas y enfermedades | I14: 2 veces por semana desde la siembra "
+        },
+        {
+          "section": "Control y seguimiento!C15:W15",
+          "text": "C15: V9 | D15: 47 | E15: 42298 [fórmula: E6+D15] | F15: Aplicación de Fungicida (1era aplicación) | G15: Prothioconazole + trifloxystrobin (500 cc/ha). | I15: 45 DDS | J15: requiere 8 mm/dia | W15: De esta etapa en delante controlar Orugas defoliadoras y chinches principalmente"
+        },
+        {
+          "section": "Control y seguimiento!C16:W16",
+          "text": "C16: R1 \n(Inicio Floracion) | D16: 52 | F16: Observación y monitoreo de plagas y enfermedades - Riego de Parcela | I16: 2 veces por semana desde la siembra | O16: 20% [valor interno 0.2] | R16: R1: Inicio de la floracion, en cualquier nudo del tallo principal\n\nAltura de 40 a 50 cm | W16: Controlar nodulos, inicia FBN"
+        },
+        {
+          "section": "Control y seguimiento!C17:W17",
+          "text": "C17: R3 \n(Inicio formacion de Vaina) | D17: 61 | E17: 42312 [fórmula: E6+D17] | F17: Aplicación de Insecticida (3da aplicación) | G17: Lufenuron (2 L/ha); + Cipermetrina (200 cc/ha); | I17: 60 DDS | K17: 240 mm de lluvia total | N17: menor a 22ºC retrazo\nMenor a 14ºC paraliza\nMayor a 40ºC caen vainas | O17: 20% [valor interno 0.2] | R17: R3: Inicio de formacion de vainas (0,5 a 2 cm), en cualquier nudo del tallo principal\n\nAltura de 60 a 80 cm | S17: 20 | T17: 21 | U17: 22 | V17: 22 | W17: Contar numero de vainas y granos por planta"
+        },
+        {
+          "section": "Control y seguimiento!F18:I18",
+          "text": "F18: Aplicación de Fungicida (2da aplicación) | G18: Solatenol + Azoxystrobin (250 cc/ha) | I18: 60 DDS"
+        },
+        {
+          "section": "Control y seguimiento!F19:I19",
+          "text": "F19: Observación y monitoreo de plagas y enfermedades - Riego de Parcela | I19: 2 veces por semana desde la siembra"
+        },
+        {
+          "section": "Control y seguimiento!C20:W20",
+          "text": "C20: R5 (Inicio formacion de Grano) | D20: 76 | E20: 42327 [fórmula: E6+D20] | F20: Aplicación de Fungicida (3era aplicación) | G20: Azoxystrobin + Ciproconazole (300 cc/ha) | H20: Nº de vainas / nudos\nNº de granos / vaina | I20: 76 DDS | O20: 40% [valor interno 0.4] | R20: R5: Inicio de formacion de granos, (vainas de 4 cm), con 10% de llenado de granos\n\nAltura de 80 a 120 cm | S20: 25 | T20: 28 | U20: 30 | V20: 37 | W20: Control de cualquier factor que pueda causar estrés en la planta (Agua, insectos, enfermedades, fertilizacion)\n\nControlarla formacion de los nódulos (número, ubicación y tamaño), en esta etapa maxima nodulacion"
+        },
+        {
+          "section": "Control y seguimiento!F21:I21",
+          "text": "F21: Aplicación de Insecticida (4ta aplicación) | G21: Lufenuron (2 L/ha) + Cipermetrina (200 cc/ha); | I21: 76 DDS"
+        },
+        {
+          "section": "Control y seguimiento!B22:X22",
+          "text": "B22: Apoyo en día de Campo | C22: R7 (inicio de Maduracion) | D22: 113 | E22: 42364 [fórmula: E6+D22] | F22: Carpida de Bordes y Camineros | H22: Peso de granos / superficie | I22: 106 DDS | J22: requiere 4 mm/dia | R22: R7: inicio de la maduracion, 50% de amarillamiento de hojas y vainas\n\nAltura de 120 a 140 cm | W22: 63 granos/m2= 100 kg/ha | X22: 8 granos/racimo\n18 racimos /planta\n18 plantas/ m2"
+        },
+        {
+          "section": "Control y seguimiento!F23:I23",
+          "text": "F23: Apoyo en el montaje de la parcela | I23: 106 DDS"
+        },
+        {
+          "section": "Control y seguimiento!B24:W24",
+          "text": "B24: Cosecha | C24: R9 (Cosecha) | D24: 123 | E24: 42374 [fórmula: E6+D24] | F24: Corte y Trilla de los cultivos | I24: 120 DDS | J24: requiere 2 mm/dia | R24: R9: Punto de maduracion para cosecha | S24: 17 | T24: 17 | U24: 17 | V24: 19 | W24: Control de cosechadora"
+        },
+        {
+          "section": "Control y seguimiento!S25:V25",
+          "text": "S25: 118 [fórmula: SUM(S10:S24)] | T25: 125 [fórmula: SUM(T10:T24)] | U25: 132 | V25: 144"
+        },
+        {
+          "section": "Control y seguimiento!B26:B26",
+          "text": "B26: Existe un umbral general de 10 orugas m lineal que define el límite para el control"
+        },
+        {
+          "section": "Control y seguimiento!B27:B27",
+          "text": "B27: Como regla general se podría decir que la soja produce 8 kg/ mm de lluvia, y para una producción promedio de 4.000 kg/ha necesitaría alrededor de 500 mm de lluvia durante el ciclo del cultivo."
+        },
+        {
+          "section": "Control y seguimiento!B28:B28",
+          "text": "B28: R1 a R5: Este período es más susceptible a la etapa anterior, donde puede reducirse un 20% o más del RTO, provocado por el aborto de flores y vainas siendo en parte compensado con el peso de los granos si cesa la deficiencia hídrica luego de R5. "
+        },
+        {
+          "section": "Control y seguimiento!B29:B29",
+          "text": "B29: R5-R7: Es el período más crítico del cultivo, ya que el estrés provoca reducciones simultáneas del número de vainas, del número de granos por vainas y del peso de los granos, sin que haya probabilidad de compensación. Pueden producir pérdidas de RTO muy importantes 40% o más."
+        },
+        {
+          "section": "Control y seguimiento!B30:B30",
+          "text": "B30: GM: II-III-IV-V = Corto, mas sensible a temperatura"
+        },
+        {
+          "section": "Control y seguimiento!B31:B31",
+          "text": "B31: GM: VI-VII-VIII = Largo, mas sensible al fotoperiodo"
+        },
+        {
+          "section": "Control y seguimiento!B32:B32",
+          "text": "B32: Temperatura + de 40ºC= reduce el crecimiento / daños a floracion / perdida de vainas"
+        },
+        {
+          "section": "Por Ciclo!B1:S1",
+          "text": "B1: Etapas | C1: Estado | D1: Precoz / Duracion  | E1: dias acumulados | F1: Ciclo | G1: mm | H1: Semi Precoz / Duracion  | I1: dias acumulados | J1: Ciclo | K1: mm | L1: Medio / Duracion  | M1: dias acumulados | N1: Ciclo | O1: mm | P1: Semi Precoz / Duracion  | Q1: dias acumulados | R1: Ciclo | S1: mm"
+        },
+        {
+          "section": "Por Ciclo!B2:R2",
+          "text": "B2: Preparación de Suelo | C2: Desecacion | E2: -15 | F2: Precoz | I2: -15 | J2: Semi precoz | M2: -15 | N2: Medio  | Q2: -15 | R2: Tardio"
+        },
+        {
+          "section": "Por Ciclo!E3:Q3",
+          "text": "E3: -3 | I3: -3 | M3: -3 | Q3: -3"
+        },
+        {
+          "section": "Por Ciclo!B4:Q4",
+          "text": "B4: Siembra | C4: Trat. Semillas | E4: -1 | I4: -1 | M4: -1 | Q4: -1"
+        },
+        {
+          "section": "Por Ciclo!C5:Q5",
+          "text": "C5: Siembra  | E5: 0 | I5: 0 | M5: 0 | Q5: 0"
+        },
+        {
+          "section": "Por Ciclo!B6:S6",
+          "text": "B6: Monitoreo y Cuidados Culturales | C6: VE | D6: 5 | E6: 5 [fórmula: D6] | G6: 10 [fórmula: D6*2] | H6: 5 | I6: 5 [fórmula: H6] | K6: 10 [fórmula: H6*2] | L6: 5 | M6: 5 [fórmula: L6] | O6: 10 [fórmula: L6*2] | P6: 5 | Q6: 5 [fórmula: P6] | S6: 10 [fórmula: P6*2]"
+        },
+        {
+          "section": "Por Ciclo!C7:S7",
+          "text": "C7: V1 | D7: 9 | E7: 14 [fórmula: D6+D7] | F7: 56 | G7: 18 [fórmula: D7*2] | H7: 9 | I7: 14 [fórmula: H6+H7] | J7: 59 | K7: 18 [fórmula: H7*2] | L7: 9 | M7: 14 [fórmula: L6+L7] | N7: 63 | O7: 18 [fórmula: L7*2] | P7: 9 | Q7: 14 [fórmula: P6+P7] | R7: 66 | S7: 18 [fórmula: P7*2]"
+        },
+        {
+          "section": "Por Ciclo!C8:S8",
+          "text": "C8: V2 a V4 | D8: 15 | E8: 29 [fórmula: D6+D7+D8] | G8: 45 [fórmula: D8*3] | H8: 16 | I8: 30 [fórmula: H6+H7+H8] | K8: 48 [fórmula: H8*3] | L8: 16 | M8: 30 [fórmula: L6+L7+L8] | O8: 48 [fórmula: L8*3] | P8: 16 | Q8: 30 [fórmula: P6+P7+P8] | S8: 48 [fórmula: P8*3]"
+        },
+        {
+          "section": "Por Ciclo!C9:S9",
+          "text": "C9: V5 a V8 | D9: 13 | E9: 42 [fórmula: D6+D7+D8+D9] | G9: 39 [fórmula: D9*3] | H9: 14 | I9: 44 [fórmula: H6+H7+H8+H9] | K9: 42 [fórmula: H9*3] | L9: 15 | M9: 45 [fórmula: L6+L7+L8+L9] | O9: 45 [fórmula: L9*3] | P9: 16 | Q9: 46 [fórmula: P6+P7+P8+P9] | S9: 48 [fórmula: P9*3]"
+        },
+        {
+          "section": "Por Ciclo!C13:S13",
+          "text": "C13: V9 | D13: 9 | E13: 51 [fórmula: D6+D7+D8+D9+D13] | G13: 54 [fórmula: D13*6] | H13: 10 | I13: 54 [fórmula: H6+H7+H8+H9+H13] | K13: 60 [fórmula: H13*6] | L13: 11 | M13: 56 [fórmula: L6+L7+L8+L9+L13] | O13: 66 [fórmula: L13*6] | P13: 12 | Q13: 58 [fórmula: P6+P7+P8+P9+P13] | S13: 72 [fórmula: P13*6]"
+        },
+        {
+          "section": "Por Ciclo!C14:S14",
+          "text": "C14: R1 \n(Inicio Floracion) | D14: 5 | E14: 56 [fórmula: D6+D7+D8+D9+D13+D14] | G14: 30 [fórmula: D14*6] | H14: 5 | I14: 59 [fórmula: H6+H7+H8+H9+H13+H14] | K14: 30 [fórmula: H14*6] | L14: 7 | M14: 63 [fórmula: L6+L7+L8+L9+L13+L14] | O14: 42 [fórmula: L14*6] | P14: 8 | Q14: 66 [fórmula: P6+P7+P8+P9+P13+P14] | S14: 48 [fórmula: P14*6]"
+        },
+        {
+          "section": "Por Ciclo!C15:S15",
+          "text": "C15: R3 \n(Inicio formacion de Vaina) | D15: 20 | E15: 76 [fórmula: D6+D7+D8+D9+D13+D14+D15] | F15: 20 | G15: 120 [fórmula: D15*6] | H15: 21 | I15: 80 [fórmula: H6+H7+H8+H9+H13+H14+H15] | J15: 21 | K15: 126 [fórmula: H15*6] | L15: 22 | M15: 85 [fórmula: L6+L7+L8+L9+L13+L14+L15] | N15: 22 | O15: 132 [fórmula: L15*6] | P15: 22 | Q15: 88 [fórmula: P6+P7+P8+P9+P13+P14+P15] | R15: 22 | S15: 132 [fórmula: P15*6]"
+        },
+        {
+          "section": "Por Ciclo!C18:S18",
+          "text": "C18: R5 (Inicio formacion de Grano) | D18: 15 | E18: 91 [fórmula: D6+D7+D8+D9+D13+D14+D15+D18] | F18: 25 | G18: 90 [fórmula: D18*6] | H18: 17 | I18: 97 [fórmula: H6+H7+H8+H9+H13+H14+H15+H18] | J18: 28 | K18: 102 [fórmula: H18*6] | L18: 18 | M18: 103 [fórmula: L6+L7+L8+L9+L13+L14+L15+L18] | N18: 30 | O18: 108 [fórmula: L18*6] | P18: 21 | Q18: 109 [fórmula: P6+P7+P8+P9+P13+P14+P15+P18] | R18: 37 | S18: 126 [fórmula: P18*6]"
+        },
+        {
+          "section": "Por Ciclo!B20:S20",
+          "text": "B20: Apoyo en día de Campo | C20: R7 (inicio de Maduracion) | D20: 10 | E20: 101 [fórmula: D6+D7+D8+D9+D13+D14+D15+D18+D20] | G20: 20 [fórmula: D20*2] | H20: 11 | I20: 108 [fórmula: H6+H7+H8+H9+H13+H14+H15+H18+H20] | K20: 22 [fórmula: H20*2] | L20: 12 | M20: 115 [fórmula: L6+L7+L8+L9+L13+L14+L15+L18+L20] | O20: 24 [fórmula: L20*2] | P20: 16 | Q20: 125 [fórmula: P6+P7+P8+P9+P13+P14+P15+P18+P20] | S20: 32 [fórmula: P20*2]"
+        },
+        {
+          "section": "Por Ciclo!B22:S22",
+          "text": "B22: Cosecha | C22: R8 (Madurez Fisiologica) | D22: 12 | E22: 113 [fórmula: D6+D7+D8+D9+D13+D14+D15+D18+D20+D22] | F22: 12 | G22: 12 [fórmula: D22*1] | H22: 12 | I22: 120 [fórmula: H6+H7+H8+H9+H13+H14+H15+H18+H20+H22] | J22: 12 | K22: 12 [fórmula: H22*1] | L22: 12 | M22: 127 [fórmula: L6+L7+L8+L9+L13+L14+L15+L18+L20+L22] | N22: 12 | O22: 12 [fórmula: L22*1] | P22: 19 | Q22: 144 [fórmula: P6+P7+P8+P9+P13+P14+P15+P18+P20+P22] | R22: 14 | S22: 19 [fórmula: P22*1]"
+        },
+        {
+          "section": "Por Ciclo!C23:R23",
+          "text": "C23: R9 (Cosecha) | D23: 7 | E23: 120 [fórmula: SUM(D6:D23)] | F23: 7 | H23: 5 | I23: 125 [fórmula: SUM(H6:H23)] | J23: 5 | L23: 5 | M23: 132 [fórmula: SUM(L6:L23)] | N23: 5 | P23: 5 | Q23: 149 [fórmula: SUM(P6:P23)] | R23: 5"
+        },
+        {
+          "section": "Por Ciclo!D24:S24",
+          "text": "D24: 120 [fórmula: SUM(D6:D23)] | F24: 120 [fórmula: SUM(F7:F23)] | G24: 438 [fórmula: SUM(G6:G22)] | H24: 125 [fórmula: SUM(H6:H23)] | J24: 125 [fórmula: SUM(J7:J23)] | K24: 470 [fórmula: SUM(K6:K22)] | L24: 132 [fórmula: SUM(L6:L23)] | N24: 132 [fórmula: SUM(N7:N23)] | O24: 505 [fórmula: SUM(O6:O22)] | P24: 149 [fórmula: SUM(P6:P23)] | R24: 144 [fórmula: SUM(R7:R23)] | S24: 553 [fórmula: SUM(S6:S22)]"
+        },
+        {
+          "section": "Por Ciclo!B25:B25",
+          "text": "B25: las temperaturas óptimas diurnas para fotosíntesis están comprendidas entre los 30 y 35 °C. Las temperaturas óptimas nocturnas para crecimiento se encuentran entre los 21 y 27 °C. La fijación de vainas se retarda con temperaturas menores a 22 °C y cesa con temperaturas menores a 14 °C, por encima de 40 °C se caen vainas"
+        },
+        {
+          "section": "Por Ciclo!B26:B26",
+          "text": "B26: para que germine la semilla  necsita de una temperatura de 25ºC  y germina dentro de los 5-8 días"
+        },
+        {
+          "section": "Por Ciclo!B27:B27",
+          "text": "B27: Existe un umbral general de 10 orugas m lineal que define el límite para el control"
+        },
+        {
+          "section": "Por Ciclo!B28:B28",
+          "text": "B28: Carencias de P, K, Ca, S y de micronutrientes disminuyen la formación de nódulos y por consiguiente la FBN."
+        },
+        {
+          "section": "Ciclo Precoz!A2:B2",
+          "text": "A2: Ciclo  | B2: Precoz"
+        },
+        {
+          "section": "Ciclo Precoz!A3:CY3",
+          "text": "A3: Requerimiento lluvia (mm) | B3: 10 [fórmula: COUNT(B1:F1)*2] | G3: 18 [fórmula: COUNT(G1:O1)*2] | P3: 45 [fórmula: COUNT(P1:AD1)*3] | AE3: 39 [fórmula: COUNT(AE1:AQ1)*3] | AR3: 54 [fórmula: COUNT(AR1:AZ1)*6] | BA3: 30 [fórmula: COUNT(BA1:BE1)*6] | BF3: 120 [fórmula: COUNT(BF1:BY1)*6] | BZ3: 90 [fórmula: COUNT(BZ1:CN1)*6] | CO3: 20 [fórmula: COUNT(CO1:CX1)*2] | CY3: 8 [fórmula: COUNT(CY1:DF1)*1]"
+        },
+        {
+          "section": "Ciclo Precoz!A4:A4",
+          "text": "A4: Ocurrencia diario de lluvia (mm)"
+        },
+        {
+          "section": "Ciclo Precoz!A5:DG5",
+          "text": "A5: Acumulado lluvia (mm) | B5: 0 [fórmula: SUM(B4:F4)] | G5: 0 [fórmula: SUM(G4:O4)] | P5: 0 [fórmula: SUM(P4:AD4)] | AE5: 0 [fórmula: SUM(AE4:AQ4)] | AR5: 0 [fórmula: SUM(AR4:AZ4)] | BA5: 0 [fórmula: SUM(BA4:BE4)] | BF5: 0 [fórmula: SUM(BF4:BY4)] | BZ5: 0 [fórmula: SUM(BZ4:CN4)] | CO5: 0 [fórmula: SUM(CO4:CX4)] | CY5: 0 [fórmula: SUM(CY4:DF4)] | DG5: 0 [fórmula: SUM(DG4:DO4)]"
+        },
+        {
+          "section": "Ciclo Precoz!A6:BY6",
+          "text": "A6: Reduccion por estrés hidrico | F6: 10% del rendimiento | BE6: 20 % del rendimiento | BY6: 40% del rendimiento"
+        },
+        {
+          "section": "Ciclo Precoz!A7:G7",
+          "text": "A7: Requerimiento temperatura (ºC) | B7: 25ºC | G7: 30ºC a 35ºC  (dia) / 21ºc a 27ºC (noche)"
+        },
+        {
+          "section": "Ciclo Precoz!A8:A8",
+          "text": "A8: Ocurrencia temperatura (ºC)"
+        },
+        {
+          "section": "Ciclo Precoz!A9:BE9",
+          "text": "A9: Limitaciones temperatura | BE9: menor a 14ºC paraliza / entre 14ºC y 22ºC retraza / mayor a 40ºC caen vainas"
+        },
+        {
+          "section": "Ciclo Precoz!A10:DO10",
+          "text": "A10: Fenologia | F10: VE | O10: V1 | AD10: V4 | AQ10: V8 | AZ10: V9 | BE10: R1 | BY10: R3 | CN10: R5 | CX10: R7 | DF10: R8 | DO10: R9"
+        },
+        {
+          "section": "Ciclo Precoz!A11:DO11",
+          "text": "A11: Identificacion  | F11: VE: Emergencia de los cotiledones sobre la superficie del suelo | O11: V1: Primer Nudo, primera hoja trifoliada abieta, sin que se toquen los bordes de cada foliolo\n\nAltura de 10 a 15 cm | AD11: Vn: Del V2 hasta Vn indica la cantidad de trifolios totalmente desarrollados\n\nAltura a V9  de 35 a 40 cm | BE11: R1: Inicio de la floracion, en cualquier nudo del tallo principal\n\nAltura de 40 a 50 cm | BY11: R3: Inicio de formacion de vainas (0,5 a 2 cm), en cualquier nudo del tallo principal\n\nAltura de 60 a 80 cm | CN11: R5: Inicio de formacion de granos, (vainas de 4 cm), con 10% de llenado de granos\n\nAltura de 80 a 120 cm | CX11: R7: inicio de la maduracion, 50% de amarillamiento de hojas y vainas\n\nAltura de 120 a 140 cm | DF11: R8: mas del 50% de defoliacion en la planta | DO11: R9: Punto de maduracion para cosecha"
+        },
+        {
+          "section": "Ciclo Precoz!A12:A12",
+          "text": "A12: Imagen"
+        },
+        {
+          "section": "Ciclo Precoz!A13:A13",
+          "text": "A13: Grafico"
+        },
+        {
+          "section": "Hoja4!K25:O25",
+          "text": "K25: Emergencia | L25: Estados Vgetativos | M25: Floracion | N25: Maduracion  | O25: Cosecha"
+        },
+        {
+          "section": "Hoja4!K26:O26",
+          "text": "K26: VE | L26: Vn | M26: R1 - R3 | N26: R4 - R6 | O26: R"
+        },
+        {
+          "section": "Hoja2!A1:A1",
+          "text": "A1: Fenologia: Es el estudio de los ciclos de vida de plantas y la manera en que ellos son influenciados por variaciones estacionales, estudia fundamentalmente el efecto de la temperatura, precipitacion y el fotoperiodo en su crecimiento y desarrollo"
+        },
+        {
+          "section": "Hoja2!A2:A2",
+          "text": "A2: La relacion entre la Fenologia y el clima, aporta datos que permiten tomar decisiones relacionadas a la aparicion de plagas y enfermedades y predecir perdidas en rendimineto, vinculadas al clima"
+        }
+      ]
+    },
+    {
+      "document": "Balance agua_lluvia-requerimiento-ET.xlsx",
+      "sha256": "b777f5d2689a921f3622b87d87836473f10b27c60c7775791b3b3b85b13cc05a",
+      "crop": "SOJA",
+      "sections": [
+        {
+          "section": "Balance agua!L1:Q1",
+          "text": "L1: Estado | M1: Req | N1: lluvia | O1: Est. Perdida | P1: Perdida por ET | Q1: Balance H2O"
+        },
+        {
+          "section": "Balance agua!L2:Q2",
+          "text": "L2: Siembra | M2: 10 | N2: 18.2 [fórmula: G2+G3+G4+G5+G6+G7] | P2: 1.3080000000000001 [fórmula: SUM(J2:J7)] | Q2: 6.8919999999999995 [fórmula: N2-M2-P2]"
+        },
+        {
+          "section": "Balance agua!L7:L7",
+          "text": "L7: VE"
+        },
+        {
+          "section": "Balance agua!M8:Q8",
+          "text": "M8: 18 | N8: 1.8 [fórmula: SUM(G8:G16)] | O8: 10% [valor interno 0.1] | P8: 1.8249 [fórmula: SUM(J8:J16)] | Q8: -18.024899999999999 [fórmula: N8-M8-P8]"
+        },
+        {
+          "section": "Balance agua!L16:L16",
+          "text": "L16: V1"
+        },
+        {
+          "section": "Balance agua!M17:Q17",
+          "text": "M17: 45 | N17: 56 [fórmula: SUM(G17:G31)] | P17: 3.62 [fórmula: SUM(J17:J31)] | Q17: 7.38 [fórmula: N17-M17-P17]"
+        },
+        {
+          "section": "Balance agua!L31:L31",
+          "text": "L31: V4"
+        },
+        {
+          "section": "Balance agua!M32:Q32",
+          "text": "M32: 39 | N32: 45.2 [fórmula: SUM(G32:G44)] | P32: 2.8679999999999999 [fórmula: SUM(J32:J44)] | Q32: 3.332000000000003 [fórmula: N32-M32-P32]"
+        },
+        {
+          "section": "Balance agua!L44:L44",
+          "text": "L44: V8"
+        },
+        {
+          "section": "Balance agua!M45:Q45",
+          "text": "M45: 54 | N45: 0 [fórmula: SUM(G45:G53)] | O45: 20% [valor interno 0.2] | P45: 2.6999999999999997 [fórmula: SUM(J45:J53)] | Q45: -56.7 [fórmula: N45-M45-P45]"
+        },
+        {
+          "section": "Balance agua!L53:L53",
+          "text": "L53: V9"
+        },
+        {
+          "section": "Balance agua!M54:Q54",
+          "text": "M54: 30 | N54: 0 [fórmula: SUM(G54:G58)] | O54: 20% [valor interno 0.2] | P54: 1.2989999999999999 [fórmula: SUM(J54:J58)] | Q54: -31.298999999999999 [fórmula: N54-M54-P54]"
+        },
+        {
+          "section": "Balance agua!L58:L58",
+          "text": "L58: R1"
+        },
+        {
+          "section": "Balance agua!M59:Q59",
+          "text": "M59: 120 | N59: 41.800000000000004 [fórmula: SUM(G59:G78)] | O59: 20% [valor interno 0.2] | P59: 6.1340000000000003 [fórmula: SUM(J59:J78)] | Q59: -84.333999999999989 [fórmula: N59-M59-P59]"
+        },
+        {
+          "section": "Balance agua!L78:L78",
+          "text": "L78: R3"
+        },
+        {
+          "section": "Balance agua!M79:Q79",
+          "text": "M79: 90 | N79: 104 [fórmula: SUM(G79:G93)] | P79: 4.0929999999999991 [fórmula: SUM(J79:J93)] | Q79: 9.907 [fórmula: N79-M79-P79]"
+        },
+        {
+          "section": "Balance agua!L93:L93",
+          "text": "L93: R5"
+        },
+        {
+          "section": "Balance agua!M94:Q94",
+          "text": "M94: 20 | N94: 76.800000000000011 [fórmula: SUM(G94:G103)] | P94: 3.0149999999999997 [fórmula: SUM(J94:J103)] | Q94: 53.785000000000011 [fórmula: N94-M94-P94]"
+        },
+        {
+          "section": "Balance agua!L103:L103",
+          "text": "L103: R7"
+        },
+        {
+          "section": "Balance agua!M104:Q104",
+          "text": "M104: 12 | N104: 53.8 [fórmula: SUM(G104:G115)] | P104: 4.1340000000000003 [fórmula: SUM(J104:J115)] | Q104: 37.665999999999997 [fórmula: N104-M104-P104]"
+        },
+        {
+          "section": "Balance agua!L115:L115",
+          "text": "L115: R8"
+        },
+        {
+          "section": "Balance agua!M116:Q116",
+          "text": "M116: 12 | N116: 4 [fórmula: SUM(G116:G120)] | P116: 1.5779999999999998 [fórmula: SUM(J116:J120)] | Q116: -9.5779999999999994 [fórmula: N116-M116-P116]"
+        },
+        {
+          "section": "Balance agua!L120:L120",
+          "text": "L120: Cosecha"
+        },
+        {
+          "section": "Balance agua!M121:Q121",
+          "text": "M121: 450 [fórmula: SUM(M2:M120)] | N121: 401.6 [fórmula: SUM(N2:N116)] | P121: 32.573900000000002 [fórmula: SUM(P2:P116)] | Q121: -80.973899999999972"
+        }
+      ]
+    },
+    {
+      "document": "BORRADOR MODELO -Informe de Consulta Tecnica Realizada.docx",
+      "sha256": "f3c69c5d9f569ec1bddc14fe79c4d741ecca701e1bf2a20d896cc5c88d26d6f3",
+      "crop": "SOJA",
+      "sections": [
+        {
+          "section": "Texto y tablas del borrador",
+          "text": "*El termino Periodo, reemplazar por Periodo analizado\n*El termino Etapa estimada reemplazar por Estado fenológico estimado\n1.- EVIDENCIA OBSERVADA SEGÚN LA ESTACION METEOROLOGICA AUTOMATICA\nTabla de conversión aproximada (Centibares a % de Humedad)\nLectura en Sensor (Centibares / kPa)\nEstado del Suelo\nSuelo Arenoso (% Humedad)\nSuelo Franco (% Humedad)\nSuelo Arcilloso (% Humedad)\n0 a 10 cB\nSaturado (Exceso de agua / Sin oxígeno)\n> 30%\n> 40%\n> 50%\n10 a 30 cB\nCapacidad de Campo (Humedad ideal para la planta)\n10% a 15%\n22% a 30%\n32% a 40%\n30 a 60 cB\nHumedad disponible (Estrés leve iniciando en arenas)\n6% a 9%\n15% a 21%\n25% a 31%\n60 a 100 cB\nSuelo Seco (Estrés hídrico moderado a severo)\n< 5%\n10% a 14%\n18% a 24%\n> 100 cB\nPunto de Marchitez (Suelo críticamente seco)\nPróximo a 0%\n< 9%\n< 15%\nPodrían ponerse como otro cuadro adicional con la misma lógica y formato que el actual o bien incluir estos datos en el actual\nNDVI del momento de la Consulta\n2.- IDENTIFICACION DE SITUACION \n3.- SUGERENCIA DE ACCIONES \nSINTOMAS VISIBLES\nEn las hojas: Aparece un plateado o bronceado característico en la cara superior (haz) de las hojas del tercio superior, que luego toma un color violáceo/púrpura oscuro. Las hojas se vuelven coriáceas (duras y de textura de cuero) y se caen prematuramente.\nManchas en los pecíolos: Si sigues la hoja hacia el tallo, verás en los pecíolos unas manchas alargadas (estrías) de color púrpura oscuro o rojizo. Este es un signo de confirmación muy confiable en el campo.\nEn las semillas: Causa la típica mancha púrpura, que afecta la calidad comercial y el poder germinativo de la semilla si se guarda para la próxima siembra.\nDefoliación prematura: Las hojas afectadas se caen rápidamente, pero con una particularidad: a menudo caen las láminas foliares y quedan los pecíolos adheridos al tallo, dándole a la planta un aspecto pelado en la punta.\nINSPECCION A CAMPO\nAl recorrer el campo, dirigir tu mirada exclusivamente al tercio superior de la planta (las hojas más nuevas y expuestas al sol), a diferencia de la mancha marrón que empieza desde abajo\nFrente a la Mancha Marrón (Septoria): La mancha marrón avanza de abajo hacia arriba y produce puntos oscuros y angulares. El tizón de Cercospora ataca de arriba hacia abajo y tiñe la hoja de forma generalizada (área continua purpúrea/bronceada).\nFrente a Fitotoxicidad por aplicación: Las quemaduras por agroquímicos suelen marcar los bordes de las hojas o dejar gotas perfectamente delimitadas en todo el lote de forma uniforme. El tizón aparece manchando la lámina completa de las hojas del estrato superior y avanza de forma progresiva según el ambiente.\nFrente a Estrés Térmico (Golpe de calor): El estrés por calor seca los bordes o daña hojas sin alterar la textura ni teñirlas de color púrpura/violáceo, y no genera las estrías oscuras en los pecíolos.\nIMÁGENES DE APOYO"
+        }
+      ]
+    }
+  ]
+}

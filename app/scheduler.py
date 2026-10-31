@@ -123,6 +123,17 @@ async def poll_telegram_subscriptions() -> None:
             logger.warning("telegram_poll_failed", error=str(exc)[:1000])
 
 
+async def schedule_station_predictions() -> None:
+    from zoneinfo import ZoneInfo
+    day = datetime.now(UTC).astimezone(ZoneInfo(settings.prediction_timezone)).date().isoformat()
+    async with AsyncSessionLocal() as db:
+        stations = list((await db.scalars(select(Station).where(
+            Station.active.is_(True), Station.deleted_at.is_(None)))).all())
+        for station in stations:
+            await enqueue_unique(db, "STATION_DAILY_PREDICTION",
+                {"station_id": str(station.id), "day": day}, priority=85)
+
+
 async def main() -> None:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -153,6 +164,9 @@ async def main() -> None:
     scheduler.add_job(schedule_notification_events, "interval", minutes=1,
                       max_instances=1, coalesce=True,
                       next_run_time=datetime.now(UTC) + timedelta(seconds=90))
+    scheduler.add_job(schedule_station_predictions, "cron", timezone=settings.prediction_timezone,
+        hour=settings.prediction_daily_hour, minute=settings.prediction_daily_minute,
+        max_instances=1, coalesce=True, misfire_grace_time=3600)
     scheduler.start()
     logger.info(
         "scheduler_started",
